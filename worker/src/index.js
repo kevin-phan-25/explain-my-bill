@@ -1,3 +1,5 @@
+import Stripe from 'stripe';
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -12,7 +14,10 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // ── Stripe Checkout Session via REST API ──
+    // Initialize Stripe
+    const stripe = new Stripe(env.STRIPE_SECRET_KEY ?? '');
+
+    // ── Create Checkout Session ──
     if (url.pathname === "/create-checkout-session" && request.method === "POST") {
       try {
         const { plan } = await request.json();
@@ -24,33 +29,19 @@ export default {
           });
         }
 
+        // Your real Stripe Price IDs
         const priceId = plan === "monthly"
           ? "price_123monthly"
           : "price_123one";
 
-        const params = new URLSearchParams({
-          payment_method_types: "card",
-          line_items: JSON.stringify([{ price: priceId, quantity: 1 }]),
+        const session = await stripe.checkout.sessions.create({
+          payment_method_types: ["card"],
+          line_items: [{ price: priceId, quantity: 1 }],
           mode: plan === "monthly" ? "subscription" : "payment",
-          success_url: "https://explainmybill.pages.dev/success?session_id={CHECKOUT_SESSION_ID}",
-          cancel_url: "https://explainmybill.pages.dev/cancel",
+          success_url: "https://yourfrontend.com/success?session_id={CHECKOUT_SESSION_ID}",
+          cancel_url: "https://yourfrontend.com/cancel",
         });
 
-        const stripeRes = await fetch("https://api.stripe.com/v1/checkout/sessions", {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${env.STRIPE_SECRET_KEY}`,
-            "Content-Type": "application/x-www-form-urlencoded",
-          },
-          body: params.toString(),
-        });
-
-        if (!stripeRes.ok) {
-          const text = await stripeRes.text();
-          throw new Error(`Stripe API error: ${stripeRes.status} – ${text}`);
-        }
-
-        const session = await stripeRes.json();
         return new Response(JSON.stringify({ id: session.id }), {
           headers: { "Content-Type": "application/json", ...corsHeaders },
         });
@@ -63,7 +54,7 @@ export default {
       }
     }
 
-    // ── Explain Bill ──
+    // ── Main: Explain Bill ──
     if (request.method === "POST") {
       try {
         const formData = await request.formData();
@@ -79,7 +70,7 @@ export default {
 
         const imageBytes = new Uint8Array(await billFile.arrayBuffer());
 
-        // OCR
+        // OCR with Workers AI Vision
         const ocrRes = await env.AI.run("@cf/meta/llama-3.2-3b-instruct", {
           image: [...imageBytes],
           prompt: "Extract all visible text from this bill exactly as shown. Include dates, procedure codes (CPT), diagnosis codes (ICD-10), descriptions, charges, insurance adjustments, patient responsibility, and totals. Preserve formatting and tables.",
@@ -87,8 +78,12 @@ export default {
         });
 
         const billText = ocrRes.response?.trim() || "";
-        if (!billText) throw new Error("Could not extract text from the uploaded bill.");
 
+        if (!billText) {
+          throw new Error("Could not extract text from the uploaded bill. Try a clearer image or PDF.");
+        }
+
+        // Paywall logic
         const isPaid = !!sessionId;
 
         const prompt = `You are an expert medical billing assistant.

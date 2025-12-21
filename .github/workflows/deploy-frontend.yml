@@ -4,14 +4,18 @@ on:
   push:
     branches:
       - main
+    paths:
+      - 'frontend/**'            # Only run if files in frontend/ change
+      - '.github/workflows/deploy-frontend.yml'
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -19,17 +23,21 @@ jobs:
       - name: Install dependencies
         run: |
           cd frontend
-          npm install  # Generates package-lock.json automatically if missing
+          npm install
 
-      - name: Build
+      - name: Build React app
         run: |
           cd frontend
-          npm run build  # Creates frontend/build folder with static files
+          npm run build
+
+      - name: Move build output to root for Cloudflare Pages
+        run: |
+          mv frontend/build build
 
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/pages-action@v1
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          projectName: explainmybill  # Confirm this EXACTLY matches your Pages project name in dashboard
-          directory: frontend/build  # CRA outputs to build/, then we deploy that
+          projectName: explainmybill
+          directory: build

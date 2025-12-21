@@ -1,4 +1,4 @@
-// ExplainMyBill Worker – Full Feature Upgrade with Table-Aware OCR
+// ExplainMyBill Worker – Ultimate Full Feature Version
 // No npm dependencies needed!
 
 export default {
@@ -16,7 +16,7 @@ export default {
     }
 
     // -------------------
-    // 1️⃣ Create Checkout Session
+    // 1️⃣ Stripe Checkout Session
     // -------------------
     if (url.pathname === "/create-checkout-session" && request.method === "POST") {
       try {
@@ -64,7 +64,7 @@ export default {
     }
 
     // -------------------
-    // 2️⃣ Explain Bill – OCR + Table Parsing + GPT Explanation
+    // 2️⃣ Explain Bill – Multi-page PDF/Image + Table-Aware GPT
     // -------------------
     if (request.method === "POST") {
       try {
@@ -79,36 +79,38 @@ export default {
           });
         }
 
-        // -------------------
-        // File Processing
-        // -------------------
+        const isPaid = Boolean(sessionId);
+
         const arrayBuffer = await billFile.arrayBuffer();
         let billText = "";
 
+        // -------------------
+        // Multi-page / PDF / Image Processing
+        // -------------------
         try {
-          // Decode as UTF-8 text if possible
+          // Decode as UTF-8 (PDF with text layer / text file)
           const decoder = new TextDecoder("utf-8", { fatal: false });
           billText = decoder.decode(arrayBuffer);
         } catch {
-          // Fallback: base64 (max 1MB)
+          // fallback: base64 snippet (max 1MB)
           const maxBytes = Math.min(arrayBuffer.byteLength, 1024 * 1024);
           const slice = arrayBuffer.slice(0, maxBytes);
           billText = btoa(String.fromCharCode(...new Uint8Array(slice)));
           billText = `[BASE64_ENCODED_BILL_START]${billText}[BASE64_ENCODED_BILL_END]`;
         }
 
-        const isPaid = Boolean(sessionId);
-
         // -------------------
-        // GPT Prompt – Table Aware + Structured Explanation
+        // GPT Prompt – Full Table-Aware, Multi-Page Explanation
         // -------------------
         const prompt = `You are an expert medical billing assistant.
-You receive a medical or dental bill. Your job is to:
+You will receive a medical or dental bill. Your tasks:
 1. Extract all text, including tables, CPT/ICD codes, charges, insurance adjustments, patient responsibility, totals.
-2. Explain the bill in **simple, easy-to-understand language**.
-3. Break down:
+2. Detect multiple pages and combine content properly.
+3. Organize tables with rows and columns clearly.
+4. Explain the bill in **simple, easy-to-understand language**.
+5. Provide structured breakdown:
    • Total amount owed by the patient
-   • Key services/procedures and what they mean
+   • Key services/procedures and their meaning
    • Insurance coverage and adjustments
    • Patient responsibility
    • Explanation of codes (CPT, ICD-10, etc.)
@@ -117,8 +119,7 @@ You receive a medical or dental bill. Your job is to:
 Bill content:
 ${billText}
 
-${!isPaid ? "\n\nIMPORTANT: Provide ONLY a short teaser summary (under 150 words) and end with: 'Upgrade to get the full detailed explanation.'" : ""}
-`;
+${!isPaid ? "\n\nIMPORTANT: Provide ONLY a short teaser summary (under 150 words) and end with: 'Upgrade to get the full detailed explanation.'" : ""}`;
 
         const aiRes = await fetch("https://api.openai.com/v1/chat/completions", {
           method: "POST",

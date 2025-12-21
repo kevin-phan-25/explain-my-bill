@@ -26,11 +26,8 @@ jobs:
         working-directory: worker
 
       - name: Deploy Worker
-        uses: cloudflare/wrangler-action@v3
-        with:
+        run: npx wrangler deploy src/index.js --cwd worker
+        env:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          workingDirectory: worker     # points to worker folder
-          packageManager: npm
-          command: deploy src/index.js # explicit entry point
-          wranglerVersion: "latest"
+          

@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - main
+    paths:
+      - 'worker/**'              # Only run if files in worker/ change
+      - '.github/workflows/deploy-worker.yml'  # Optional: re-run if workflow changes
 
 jobs:
   deploy:
@@ -17,5 +20,5 @@ jobs:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
           workingDirectory: worker
-          command: deploy src/index.js  # ← This explicitly tells Wrangler the entry point
+          command: deploy src/index.js
           packageManager: npm

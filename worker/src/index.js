@@ -9,7 +9,6 @@ export default {
       "Access-Control-Allow-Headers": "Content-Type",
     };
 
-    // Preflight request
     if (request.method === "OPTIONS") {
       return new Response(null, { headers: corsHeaders });
     }
@@ -64,7 +63,7 @@ export default {
     if (request.method === "POST") {
       try {
         const formData = await request.formData();
-        const billFile = formData.get("bill"); // MUST match frontend key
+        const billFile = formData.get("bill");
         const sessionId = formData.get("sessionId") || url.searchParams.get("session_id");
 
         if (!billFile || (billFile.size ?? 0) === 0) {
@@ -75,14 +74,31 @@ export default {
         }
 
         const imageBytes = new Uint8Array(await billFile.arrayBuffer());
+        const base64Image = btoa(String.fromCharCode(...imageBytes));
 
-        const ocrRes = await env.AI.run("@cf/meta/llama-3.2-3b-instruct", {
-          image: [...imageBytes],
-          prompt: "Extract all visible text from this medical or dental bill exactly as shown. Include dates, procedure codes (CPT), diagnosis codes (ICD-10), descriptions, charges, insurance adjustments, patient responsibility, and totals. Preserve formatting and tables.",
-          max_tokens: 1024,
+        // --- Use OpenAI API directly instead of AI.run ---
+        const ocrPrompt = `Extract all visible text from this medical or dental bill exactly as shown. Include dates, procedure codes (CPT), diagnosis codes (ICD-10), descriptions, charges, insurance adjustments, patient responsibility, and totals. Preserve formatting and tables.
+        
+        The bill is provided as a base64 string: ${base64Image}`;
+
+        const ocrRes = await fetch("https://api.openai.com/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
+          },
+          body: JSON.stringify({
+            model: "gpt-4o-mini",
+            messages: [{ role: "user", content: ocrPrompt }],
+            temperature: 0,
+            max_tokens: 1024,
+          }),
         });
 
-        const billText = ocrRes.response?.trim() || "";
+        const ocrData = await ocrRes.json().catch(() => ({}));
+        if (!ocrRes.ok) throw new Error(`OpenAI OCR error: ${ocrRes.status} – ${JSON.stringify(ocrData)}`);
+
+        const billText = ocrData.choices?.[0]?.message?.content?.trim() || "";
         if (!billText) throw new Error("Could not extract text from the bill. Try a clearer image or PDF.");
 
         const isPaid = Boolean(sessionId);
@@ -115,7 +131,7 @@ ${!isPaid ? "\n\nIMPORTANT: Provide ONLY a short teaser summary (under 150 words
         });
 
         const aiData = await aiRes.json().catch(() => ({}));
-        if (!aiRes.ok) throw new Error(`OpenAI error: ${aiRes.status} – ${JSON.stringify(aiData)}`);
+        if (!aiRes.ok) throw new Error(`OpenAI explanation error: ${aiRes.status} – ${JSON.stringify(aiData)}`);
 
         const explanation = aiData.choices?.[0]?.message?.content?.trim() || "No explanation generated.";
 

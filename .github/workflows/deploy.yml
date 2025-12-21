@@ -24,10 +24,8 @@ jobs:
           npm install
           npm run build
           # Ensure the build folder exists for Wrangler
-          rm -rf build
-          mkdir build
-          cp -r dist/* build/
-      
+          ls -la build  # check build contents
+
       - name: Install worker dependencies
         run: |
           cd worker

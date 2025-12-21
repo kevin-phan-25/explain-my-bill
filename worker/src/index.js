@@ -1,4 +1,4 @@
-import Stripe from "stripe";
+import Stripe from 'stripe';
 
 export default {
   async fetch(request, env, ctx) {
@@ -14,82 +14,81 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    const stripe = new Stripe(env.STRIPE_SECRET_KEY ?? "");
+    const stripe = new Stripe(env.STRIPE_SECRET_KEY ?? '');
 
+    // Create Checkout Session
     if (url.pathname === "/create-checkout-session" && request.method === "POST") {
       try {
         const { plan } = await request.json();
-        if (!["monthly", "one-time"].includes(plan)) {
-          return new Response(JSON.stringify({ error: "Invalid plan" }), {
-            status: 400,
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-          });
-        }
 
         const priceId = plan === "monthly"
-          ? "price_1YourMonthlyPriceIDHere"
-          : "price_1YourOneTimePriceIDHere";
+          ? "price_REPLACE_WITH_YOUR_MONTHLY_PRICE_ID"
+          : "price_REPLACE_WITH_YOUR_ONE_TIME_PRICE_ID";
 
         const session = await stripe.checkout.sessions.create({
           payment_method_types: ["card"],
           line_items: [{ price: priceId, quantity: 1 }],
           mode: plan === "monthly" ? "subscription" : "payment",
-          success_url: `https://explainmybill.pages.dev/success?session_id={CHECKOUT_SESSION_ID}`,
-          cancel_url: `https://explainmybill.pages.dev/cancel`,
+          success_url: "https://explainmybill.pages.dev/success?session_id={CHECKOUT_SESSION_ID}",
+          cancel_url: "https://explainmybill.pages.dev/cancel",
         });
 
         return new Response(JSON.stringify({ id: session.id }), {
           headers: { "Content-Type": "application/json", ...corsHeaders },
         });
       } catch (err) {
-        console.error("Stripe error:", err);
-        return new Response(JSON.stringify({ error: err.message || "Payment setup failed" }), {
+        return new Response(JSON.stringify({ error: err.message }), {
           status: 500,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
     }
 
-    // Main bill explanation endpoint
+    // Main bill explanation
     if (request.method === "POST") {
       try {
         const formData = await request.formData();
         const billFile = formData.get("bill");
         const sessionId = formData.get("sessionId") || url.searchParams.get("session_id");
 
-        let billText = "";
-
-        if (billFile && billFile.size > 0) {
-          const imageBytes = new Uint8Array(await billFile.arrayBuffer());
-          const ocrRes = await env.AI.run("@cf/meta/llama-3.2-vision-instruct", {
-            image: [...imageBytes],
-            prompt: "Extract all visible text from this medical or dental bill exactly as shown. Include procedure codes, dates, amounts, descriptions, insurance adjustments, and patient responsibility. Preserve tables and formatting.",
-            max_tokens: 1024,
+        if (!billFile || billFile.size === 0) {
+          return new Response(JSON.stringify({ error: "No bill file uploaded" }), {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
           });
-          billText = ocrRes.response?.trim() || "";
         }
+
+        const imageBytes = new Uint8Array(await billFile.arrayBuffer());
+
+        // Improved OCR prompt for medical bills
+        const ocrRes = await env.AI.run("@cf/meta/llama-3.2-3b-instruct", {
+          image: [...imageBytes],
+          prompt: "Extract ALL text from this medical/dental/utility bill exactly as shown. Include dates, procedure codes (CPT), diagnosis codes (ICD-10), charges, insurance adjustments, patient responsibility, and totals. Preserve table structure.",
+          max_tokens: 1024,
+        });
+
+        const billText = ocrRes.response?.trim() || "";
 
         if (!billText) {
-          throw new Error("No text extracted from bill – please upload a clear image or PDF.");
+          throw new Error("Failed to extract text from bill");
         }
 
-        const isPaid = !!sessionId;
-        const prompt = `You are an expert medical billing assistant.
+        const isPaid = !!sessionId;  // TODO: Verify with KV + webhook later
 
-Explain this bill in simple language.
+        const prompt = `You are an expert billing assistant.
 
-Break down:
-• Total patient owes
-• Key services and meanings
-• Insurance adjustments
-• Patient responsibility
-• Code explanations (CPT, ICD-10, etc.)
-• Red flags or next steps
+Explain this bill in simple terms:
+- Total patient owes
+- Key charges and meanings
+- Insurance coverage/adjustments
+- Patient responsibility
+- Code explanations
+- Red flags/next steps
 
 Bill text:
 ${billText}
 
-${!isPaid ? "\n\nGive ONLY a short teaser (under 150 words) and end with: 'Upgrade for full detailed explanation.'" : ""}`;
+${!isPaid ? "\n\nGive ONLY a short teaser (<150 words) ending with: 'Upgrade for full explanation.'" : ""}`;
 
         const aiRes = await fetch("https://api.openai.com/v1/chat/completions", {
           method: "POST",
@@ -98,35 +97,29 @@ ${!isPaid ? "\n\nGive ONLY a short teaser (under 150 words) and end with: 'Upgra
             "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
           },
           body: JSON.stringify({
-            model: "gpt-4o",
+            model: "gpt-4o-mini",
             messages: [{ role: "user", content: prompt }],
             temperature: 0.5,
             max_tokens: isPaid ? 1500 : 300,
           }),
         });
 
-        if (!aiRes.ok) {
-          const errText = await aiRes.text();
-          throw new Error(`OpenAI API error: ${aiRes.status} – ${errText}`);
-        }
+        if (!aiRes.ok) throw new Error(`OpenAI error: ${await aiRes.text()}`);
 
-        const aiData = await aiRes.json();
-        const explanation = aiData.choices?.[0]?.message?.content?.trim() || "No explanation generated.";
+        const data = await aiRes.json();
+        const explanation = data.choices?.[0]?.message?.content?.trim() || "No explanation.";
 
         return new Response(JSON.stringify({ explanation, isPaid }), {
           headers: { "Content-Type": "application/json", ...corsHeaders },
         });
       } catch (err) {
-        console.error("Explanation error:", err);
-        return new Response(JSON.stringify({ error: err.message || "Processing failed" }), {
+        return new Response(JSON.stringify({ error: err.message }), {
           status: 500,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
     }
 
-    return new Response("ExplainMyBill Worker – POST multipart/form-data with 'bill' file", {
-      headers: corsHeaders,
-    });
+    return new Response("ExplainMyBill Worker – POST bill file for explanation", { headers: corsHeaders });
   },
 };

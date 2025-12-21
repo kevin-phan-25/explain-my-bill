@@ -1,6 +1,4 @@
-# .github/workflows/deploy-frontend.yml (full updated file)
-
-name: Deploy Frontend
+name: Deploy Frontend to Cloudflare Pages
 
 on:
   push:
@@ -9,10 +7,16 @@ on:
     paths:
       - 'frontend/**'
       - '.github/workflows/deploy-frontend.yml'
+      - 'frontend/package.json'
+      - 'frontend/package-lock.json'
 
 jobs:
-  build-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: write
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -21,25 +25,22 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
-        run: |
-          cd frontend
-          npm install
+        run: npm install
+        working-directory: frontend
 
       - name: Build React app
-        run: |
-          cd frontend
-          npm run build
-
-      - name: Move build to root (for Create React App preset)
-        run: |
-          mv frontend/build build
+        run: npm run build
+        working-directory: frontend
 
       - name: Deploy to Cloudflare Pages
-        uses: cloudflare/pages-action@v1
+        uses: cloudflare/pages-action@1
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          projectName: explain-my-bill   # ← Fixed: now matches your actual project
-          directory: build
+          projectName: explainmybill-frontend  # Recommended new name (no hyphen conflict)
+          directory: frontend/build                 # Points directly to CRA build output
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }} # Required for the action

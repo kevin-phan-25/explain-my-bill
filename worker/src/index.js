@@ -1,6 +1,4 @@
-// worker/src/index.js
-
-import Stripe from 'stripe';
+// worker/src/index.js - No npm dependencies needed!
 
 export default {
   async fetch(request, env, ctx) {
@@ -16,10 +14,7 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // Initialize Stripe from secret
-    const stripe = new Stripe(env.STRIPE_SECRET_KEY ?? '');
-
-    // Create Checkout Session
+    // Create Checkout Session using direct Stripe API
     if (url.pathname === "/create-checkout-session" && request.method === "POST") {
       try {
         const { plan } = await request.json();
@@ -31,16 +26,27 @@ export default {
         }
 
         const priceId = plan === "monthly"
-          ? "price_YourMonthlyPriceID"  // Replace with real ID
-          : "price_YourOneTimePriceID"; // Replace with real ID
+          ? "price_YourMonthlyPriceID"  // Replace with real
+          : "price_YourOneTimePriceID"; // Replace with real
 
-        const session = await stripe.checkout.sessions.create({
-          payment_method_types: ["card"],
-          line_items: [{ price: priceId, quantity: 1 }],
-          mode: plan === "monthly" ? "subscription" : "payment",
-          success_url: "https://explain-my-bill.pages.dev/success?session_id={CHECKOUT_SESSION_ID}",
-          cancel_url: "https://explain-my-bill.pages.dev/cancel",
+        const stripeRes = await fetch("https://api.stripe.com/v1/checkout/sessions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${env.STRIPE_SECRET_KEY}`,
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+          body: new URLSearchParams({
+            "payment_method_types[0]": "card",
+            "line_items[0][price]": priceId,
+            "line_items[0][quantity]": "1",
+            "mode": plan === "monthly" ? "subscription" : "payment",
+            "success_url": "https://explain-my-bill.pages.dev/success?session_id={CHECKOUT_SESSION_ID}",
+            "cancel_url": "https://explain-my-bill.pages.dev/cancel",
+          }),
         });
+
+        const session = await stripeRes.json();
+        if (!stripeRes.ok) throw new Error(session.error?.message || "Stripe error");
 
         return new Response(JSON.stringify({ id: session.id }), {
           headers: { "Content-Type": "application/json", ...corsHeaders },
@@ -54,7 +60,7 @@ export default {
       }
     }
 
-    // Main: Explain Bill
+    // Main: Explain Bill (your OCR + AI code)
     if (request.method === "POST") {
       try {
         const formData = await request.formData();
@@ -70,7 +76,6 @@ export default {
 
         const imageBytes = new Uint8Array(await billFile.arrayBuffer());
 
-        // OCR with Workers AI Vision model
         const ocrRes = await env.AI.run("@cf/meta/llama-3.2-3b-instruct", {
           image: [...imageBytes],
           prompt: "Extract all visible text from this medical or dental bill exactly as shown. Include dates, procedure codes (CPT), diagnosis codes (ICD-10), descriptions, charges, insurance adjustments, patient responsibility, and totals. Preserve formatting and tables.",
@@ -82,7 +87,6 @@ export default {
           throw new Error("Could not extract text from the bill. Try a clearer image or PDF.");
         }
 
-        // Paywall
         const isPaid = !!sessionId;
 
         const prompt = `You are an expert medical billing assistant.

@@ -5,8 +5,8 @@ on:
     branches:
       - main
     paths:
-      - 'worker/**'              # Only run if files in worker/ change
-      - '.github/workflows/deploy-worker.yml'  # Optional: re-run if workflow changes
+      - 'worker/**'
+      - '.github/workflows/deploy-worker.yml'
 
 jobs:
   deploy:
@@ -20,5 +20,8 @@ jobs:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
           workingDirectory: worker
-          command: deploy src/index.js
           packageManager: npm
+          # Explicitly tell Wrangler to use the toml config
+          # This forces it to read wrangler.toml and main = "src/index.js"
+          preCommands: echo "Using wrangler.toml config"
+          # No command override — let it auto-detect

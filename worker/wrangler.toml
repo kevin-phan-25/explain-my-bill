@@ -1,1 +1,10 @@
+name = "explain-my-bill"
+main = "src/index.js"
+compatibility_date = "2025-12-21"
 
+[vars]
+# Optional static vars
+
+[[kv_namespaces]]
+binding = "PAID_SESSIONS"
+id = "5c80b0fbb48b4a708d55806ae6788dc5"  # Create in dashboard if you want persistent sessions

@@ -1,4 +1,4 @@
-const WORKER_URL = "https://explain-my-bill.your-subdomain.workers.dev";
+const WORKER_URL = "https://explainmybill.kevin-phan-25.pages.dev";
 
 export async function createCheckoutSession(plan) {
   const res = await fetch(`${WORKER_URL}/create-checkout-session`, {

@@ -10,17 +10,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1) Checkout repo
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2) Setup Node
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      # 3) Build frontend
+      # ---- FRONTEND ----
       - name: Install and build frontend
         run: |
           cd frontend
@@ -29,21 +27,20 @@ jobs:
 
       - name: Verify frontend build output
         run: |
-          echo "Listing frontend folder:"
+          echo "Frontend contents:"
           ls -la frontend
-          echo "Listing frontend dist:"
-          ls -la frontend/dist || echo "No dist folder found"
+          echo "Build output:"
+          ls -la frontend/build
 
-      # 4) Install worker dependencies
+      # ---- WORKER ----
       - name: Install worker dependencies
         run: |
           cd worker
           npm install
 
-      # 5) Deploy to Cloudflare Worker
-      - name: Deploy to Cloudflare
-        run: |
-          npx wrangler deploy
+      # ---- DEPLOY ----
+      - name: Deploy Worker + Assets
+        run: npx wrangler deploy
         env:
-          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}

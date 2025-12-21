@@ -1,3 +1,5 @@
+// worker/src/index.js
+
 import Stripe from 'stripe';
 
 export default {
@@ -14,7 +16,6 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // Initialize Stripe
     const stripe = new Stripe(env.STRIPE_SECRET_KEY ?? '');
 
     // ── Create Checkout Session ──
@@ -29,17 +30,14 @@ export default {
           });
         }
 
-        // Your real Stripe Price IDs
-        const priceId = plan === "monthly"
-          ? "price_123monthly"   // Monthly subscription
-          : "price_123one";      // One-time payment
+        const priceId = plan === "monthly" ? "price_123monthly" : "price_123one";
 
         const session = await stripe.checkout.sessions.create({
           payment_method_types: ["card"],
           line_items: [{ price: priceId, quantity: 1 }],
           mode: plan === "monthly" ? "subscription" : "payment",
-          success_url: "https://explainmybill.pages.dev/success?session_id={CHECKOUT_SESSION_ID}",
-          cancel_url: "https://explainmybill.pages.dev/cancel",
+          success_url: "https://explainmybill-frontend.pages.dev/success?session_id={CHECKOUT_SESSION_ID}",
+          cancel_url: "https://explainmybill-frontend.pages.dev/cancel",
         });
 
         return new Response(JSON.stringify({ id: session.id }), {
@@ -47,7 +45,7 @@ export default {
         });
       } catch (err) {
         console.error("Stripe error:", err);
-        return new Response(JSON.stringify({ error: err.message || "Payment setup failed" }), {
+        return new Response(JSON.stringify({ error: err.message || "Payment failed" }), {
           status: 500,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
@@ -70,38 +68,37 @@ export default {
 
         const imageBytes = new Uint8Array(await billFile.arrayBuffer());
 
-        // OCR with Cloudflare Workers AI Vision model
-        const ocrRes = await env.AI.run("@cf/meta/llama-3.2-3b-instruct", {
+        // Critical fix: Use a VISION model for OCR on images/PDFs
+        const ocrRes = await env.AI.run("@cf/meta/llama-3.2-11b-vision-instruct", {
           image: [...imageBytes],
-          prompt: "Extract all visible text from this bill exactly as shown. Include dates, procedure codes (CPT), diagnosis codes (ICD-10), descriptions, charges, insurance adjustments, patient responsibility, and totals. Preserve formatting and tables.",
+          prompt: "Extract all visible text from this bill exactly as shown. Include dates, procedure codes (CPT), diagnosis codes (ICD-10), descriptions, charges, insurance adjustments, patient responsibility, and totals. Preserve table formatting as much as possible.",
           max_tokens: 1024,
         });
 
         const billText = ocrRes.response?.trim() || "";
 
         if (!billText) {
-          throw new Error("Could not extract text from the uploaded bill. Try a clearer image or PDF.");
+          throw new Error("Failed to extract text from bill. Try a clearer image or PDF.");
         }
 
-        // Paywall logic (temporary – upgrade to webhook + KV later)
         const isPaid = !!sessionId;
 
-        const prompt = `You are an expert medical billing assistant.
+        const prompt = `You are an expert medical billing assistant helping patients understand their bills.
 
 Explain this bill in simple, easy-to-understand language.
 
-Break down:
+Break it down clearly:
 • Total amount owed by the patient
 • Key services/procedures and what they mean
 • Insurance coverage and adjustments
 • Patient responsibility
-• Explanation of codes (CPT, ICD-10, etc.)
+• Explanation of important codes (CPT, ICD-10, etc.)
 • Any red flags or recommended next steps
 
 Bill content:
 ${billText}
 
-${!isPaid ? "\n\nIMPORTANT: Provide ONLY a short teaser summary (under 150 words) and end with: 'Upgrade to get the full detailed explanation.'" : ""}`;
+${!isPaid ? "\n\nIMPORTANT: Give ONLY a short teaser summary (under 150 words) and end with: 'Upgrade for the full detailed explanation.'" : ""}`;
 
         const aiRes = await fetch("https://api.openai.com/v1/chat/completions", {
           method: "POST",
@@ -110,7 +107,7 @@ ${!isPaid ? "\n\nIMPORTANT: Provide ONLY a short teaser summary (under 150 words
             "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
           },
           body: JSON.stringify({
-            model: "gpt-4o-mini",  // Fast & cost-effective
+            model: "gpt-4o-mini",
             messages: [{ role: "user", content: prompt }],
             temperature: 0.5,
             max_tokens: isPaid ? 1500 : 300,
@@ -119,7 +116,7 @@ ${!isPaid ? "\n\nIMPORTANT: Provide ONLY a short teaser summary (under 150 words
 
         if (!aiRes.ok) {
           const errText = await aiRes.text();
-          throw new Error(`OpenAI API error: ${aiRes.status} – ${errText}`);
+          throw new Error(`OpenAI error: ${aiRes.status} – ${errText}`);
         }
 
         const aiData = await aiRes.json();
@@ -130,14 +127,13 @@ ${!isPaid ? "\n\nIMPORTANT: Provide ONLY a short teaser summary (under 150 words
         });
       } catch (err) {
         console.error("Worker error:", err);
-        return new Response(JSON.stringify({ error: err.message || "Something went wrong" }), {
+        return new Response(JSON.stringify({ error: err.message || "Processing failed" }), {
           status: 500,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
     }
 
-    // Default response
     return new Response("ExplainMyBill Worker API – POST a bill file to get an explanation.", {
       headers: corsHeaders,
     });

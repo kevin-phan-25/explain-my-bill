@@ -1,5 +1,7 @@
 // worker/src/index.js
 
+import Stripe from 'stripe';
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -14,60 +16,45 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // ── Create Checkout Session ──
+    // Initialize Stripe from secret
+    const stripe = new Stripe(env.STRIPE_SECRET_KEY ?? '');
+
+    // Create Checkout Session
     if (url.pathname === "/create-checkout-session" && request.method === "POST") {
       try {
         const { plan } = await request.json();
-
         if (!["monthly", "one-time"].includes(plan)) {
           return new Response(JSON.stringify({ error: "Invalid plan" }), {
             status: 400,
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json", ...corsHeaders },
           });
         }
 
-        // Your real Stripe Price IDs
         const priceId = plan === "monthly"
-          ? "price_123monthly"
-          : "price_123one";
+          ? "price_YourMonthlyPriceID"  // Replace with real ID
+          : "price_YourOneTimePriceID"; // Replace with real ID
 
-        // Use Stripe REST API via fetch (no Node dependency)
-        const stripeRes = await fetch("https://api.stripe.com/v1/checkout/sessions", {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${env.STRIPE_SECRET_KEY}`,
-            "Content-Type": "application/x-www-form-urlencoded",
-          },
-          body: new URLSearchParams({
-            "payment_method_types[]": "card",
-            "line_items[0][price]": priceId,
-            "line_items[0][quantity]": "1",
-            "mode": plan === "monthly" ? "subscription" : "payment",
-            "success_url": "https://yourfrontend.com/success?session_id={CHECKOUT_SESSION_ID}",
-            "cancel_url": "https://yourfrontend.com/cancel",
-          }),
+        const session = await stripe.checkout.sessions.create({
+          payment_method_types: ["card"],
+          line_items: [{ price: priceId, quantity: 1 }],
+          mode: plan === "monthly" ? "subscription" : "payment",
+          success_url: "https://explain-my-bill.pages.dev/success?session_id={CHECKOUT_SESSION_ID}",
+          cancel_url: "https://explain-my-bill.pages.dev/cancel",
         });
-
-        if (!stripeRes.ok) {
-          const errText = await stripeRes.text();
-          throw new Error(`Stripe API error: ${errText}`);
-        }
-
-        const session = await stripeRes.json();
 
         return new Response(JSON.stringify({ id: session.id }), {
           headers: { "Content-Type": "application/json", ...corsHeaders },
         });
       } catch (err) {
         console.error("Stripe error:", err);
-        return new Response(JSON.stringify({ error: err.message || "Payment setup failed" }), {
+        return new Response(JSON.stringify({ error: err.message || "Payment failed" }), {
           status: 500,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...corsHeaders },
         });
       }
     }
 
-    // ── Main: Explain Bill ──
+    // Main: Explain Bill
     if (request.method === "POST") {
       try {
         const formData = await request.formData();
@@ -77,31 +64,29 @@ export default {
         if (!billFile || billFile.size === 0) {
           return new Response(JSON.stringify({ error: "No bill file uploaded" }), {
             status: 400,
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json", ...corsHeaders },
           });
         }
 
         const imageBytes = new Uint8Array(await billFile.arrayBuffer());
 
-        // OCR with Workers AI Vision
+        // OCR with Workers AI Vision model
         const ocrRes = await env.AI.run("@cf/meta/llama-3.2-3b-instruct", {
           image: [...imageBytes],
-          prompt: "Extract all visible text from this bill exactly as shown. Include dates, procedure codes (CPT), diagnosis codes (ICD-10), descriptions, charges, insurance adjustments, patient responsibility, and totals. Preserve formatting and tables.",
+          prompt: "Extract all visible text from this medical or dental bill exactly as shown. Include dates, procedure codes (CPT), diagnosis codes (ICD-10), descriptions, charges, insurance adjustments, patient responsibility, and totals. Preserve formatting and tables.",
           max_tokens: 1024,
         });
 
         const billText = ocrRes.response?.trim() || "";
-
         if (!billText) {
-          throw new Error("Could not extract text from the uploaded bill. Try a clearer image or PDF.");
+          throw new Error("Could not extract text from the bill. Try a clearer image or PDF.");
         }
 
+        // Paywall
         const isPaid = !!sessionId;
 
         const prompt = `You are an expert medical billing assistant.
-
 Explain this bill in simple, easy-to-understand language.
-
 Break down:
 • Total amount owed by the patient
 • Key services/procedures and what they mean
@@ -109,10 +94,8 @@ Break down:
 • Patient responsibility
 • Explanation of codes (CPT, ICD-10, etc.)
 • Any red flags or recommended next steps
-
 Bill content:
 ${billText}
-
 ${!isPaid ? "\n\nIMPORTANT: Provide ONLY a short teaser summary (under 150 words) and end with: 'Upgrade to get the full detailed explanation.'" : ""}`;
 
         const aiRes = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -131,7 +114,7 @@ ${!isPaid ? "\n\nIMPORTANT: Provide ONLY a short teaser summary (under 150 words
 
         if (!aiRes.ok) {
           const errText = await aiRes.text();
-          throw new Error(`OpenAI API error: ${aiRes.status} – ${errText}`);
+          throw new Error(`OpenAI error: ${aiRes.status} – ${errText}`);
         }
 
         const aiData = await aiRes.json();
@@ -142,9 +125,9 @@ ${!isPaid ? "\n\nIMPORTANT: Provide ONLY a short teaser summary (under 150 words
         });
       } catch (err) {
         console.error("Worker error:", err);
-        return new Response(JSON.stringify({ error: err.message || "Something went wrong" }), {
+        return new Response(JSON.stringify({ error: err.message || "Processing failed" }), {
           status: 500,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...corsHeaders },
         });
       }
     }

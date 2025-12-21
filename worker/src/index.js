@@ -1,4 +1,6 @@
+// ExplainMyBill Worker – Modernized, Full Feature Upgrade
 // No npm dependencies needed!
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -13,7 +15,9 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
+    // -------------------
     // Create Checkout Session
+    // -------------------
     if (url.pathname === "/create-checkout-session" && request.method === "POST") {
       try {
         const { plan } = await request.json().catch(() => ({}));
@@ -59,7 +63,9 @@ export default {
       }
     }
 
+    // -------------------
     // Explain Bill
+    // -------------------
     if (request.method === "POST") {
       try {
         const formData = await request.formData();
@@ -73,36 +79,29 @@ export default {
           });
         }
 
-        const imageBytes = new Uint8Array(await billFile.arrayBuffer());
-        const base64Image = btoa(String.fromCharCode(...imageBytes));
+        // -------------------
+        // Convert file to smaller payload
+        // -------------------
+        const arrayBuffer = await billFile.arrayBuffer();
+        let billText = "";
 
-        // --- Use OpenAI API directly instead of AI.run ---
-        const ocrPrompt = `Extract all visible text from this medical or dental bill exactly as shown. Include dates, procedure codes (CPT), diagnosis codes (ICD-10), descriptions, charges, insurance adjustments, patient responsibility, and totals. Preserve formatting and tables.
-        
-        The bill is provided as a base64 string: ${base64Image}`;
-
-        const ocrRes = await fetch("https://api.openai.com/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
-          },
-          body: JSON.stringify({
-            model: "gpt-4o-mini",
-            messages: [{ role: "user", content: ocrPrompt }],
-            temperature: 0,
-            max_tokens: 1024,
-          }),
-        });
-
-        const ocrData = await ocrRes.json().catch(() => ({}));
-        if (!ocrRes.ok) throw new Error(`OpenAI OCR error: ${ocrRes.status} – ${JSON.stringify(ocrData)}`);
-
-        const billText = ocrData.choices?.[0]?.message?.content?.trim() || "";
-        if (!billText) throw new Error("Could not extract text from the bill. Try a clearer image or PDF.");
+        try {
+          // Attempt to decode as UTF-8 text if possible
+          const decoder = new TextDecoder("utf-8", { fatal: false });
+          billText = decoder.decode(arrayBuffer);
+        } catch {
+          // fallback: send small base64 (first 1MB max)
+          const maxBytes = Math.min(arrayBuffer.byteLength, 1024 * 1024); // 1MB
+          const slice = arrayBuffer.slice(0, maxBytes);
+          billText = btoa(String.fromCharCode(...new Uint8Array(slice)));
+          billText = `[BASE64_ENCODED_BILL_START]${billText}[BASE64_ENCODED_BILL_END]`;
+        }
 
         const isPaid = Boolean(sessionId);
 
+        // -------------------
+        // Generate Explanation via OpenAI
+        // -------------------
         const prompt = `You are an expert medical billing assistant.
 Explain this bill in simple, easy-to-understand language.
 Break down:

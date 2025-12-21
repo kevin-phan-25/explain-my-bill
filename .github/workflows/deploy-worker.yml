@@ -21,4 +21,5 @@ jobs:
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
           workingDirectory: worker
           packageManager: npm
-          command: deploy src/index.js   # This explicitly sets the entry point
+          wranglerVersion: "latest"   # This forces modern Wrangler (4.x) – fixes toml detection!
+          # No command needed – latest Wrangler auto-detects wrangler.toml and main

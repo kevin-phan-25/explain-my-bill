@@ -1,7 +1,3 @@
-// worker/src/index.js
-
-import Stripe from 'stripe';
-
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -16,9 +12,7 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    const stripe = new Stripe(env.STRIPE_SECRET_KEY ?? '');
-
-    // ── Create Checkout Session ──
+    // ── Create Checkout Session via Stripe REST API ──
     if (url.pathname === "/create-checkout-session" && request.method === "POST") {
       try {
         const { plan } = await request.json();
@@ -30,22 +24,40 @@ export default {
           });
         }
 
-        const priceId = plan === "monthly" ? "price_123monthly" : "price_123one";
+        const priceId = plan === "monthly"
+          ? "price_123monthly" // Replace with your real Stripe Price IDs
+          : "price_123one";
 
-        const session = await stripe.checkout.sessions.create({
-          payment_method_types: ["card"],
-          line_items: [{ price: priceId, quantity: 1 }],
+        const params = new URLSearchParams({
+          payment_method_types: "card",
+          line_items: JSON.stringify([{ price: priceId, quantity: 1 }]),
           mode: plan === "monthly" ? "subscription" : "payment",
-          success_url: "https://explainmybill-frontend.pages.dev/success?session_id={CHECKOUT_SESSION_ID}",
-          cancel_url: "https://explainmybill-frontend.pages.dev/cancel",
+          success_url: "https://explainmybill.pages.dev/success?session_id={CHECKOUT_SESSION_ID}",
+          cancel_url: "https://explainmybill.pages.dev/cancel",
         });
+
+        const stripeRes = await fetch("https://api.stripe.com/v1/checkout/sessions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${env.STRIPE_SECRET_KEY}`,
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+          body: params.toString(),
+        });
+
+        if (!stripeRes.ok) {
+          const text = await stripeRes.text();
+          throw new Error(`Stripe API error: ${stripeRes.status} – ${text}`);
+        }
+
+        const session = await stripeRes.json();
 
         return new Response(JSON.stringify({ id: session.id }), {
           headers: { "Content-Type": "application/json", ...corsHeaders },
         });
       } catch (err) {
         console.error("Stripe error:", err);
-        return new Response(JSON.stringify({ error: err.message || "Payment failed" }), {
+        return new Response(JSON.stringify({ error: err.message || "Payment setup failed" }), {
           status: 500,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
@@ -68,37 +80,38 @@ export default {
 
         const imageBytes = new Uint8Array(await billFile.arrayBuffer());
 
-        // Best vision model for OCR
-        const ocrRes = await env.AI.run("@cf/meta/llama-3.2-11b-vision-instruct", {
+        // OCR with Cloudflare Workers AI Vision model
+        const ocrRes = await env.AI.run("@cf/meta/llama-3.2-3b-instruct", {
           image: [...imageBytes],
-          prompt: "Extract all visible text from this bill exactly as shown. Include dates, procedure codes (CPT), diagnosis codes (ICD-10), descriptions, charges, insurance adjustments, patient responsibility, and totals. Preserve table formatting as much as possible.",
+          prompt: "Extract all visible text from this bill exactly as shown. Include dates, procedure codes (CPT), diagnosis codes (ICD-10), descriptions, charges, insurance adjustments, patient responsibility, and totals. Preserve formatting and tables.",
           max_tokens: 1024,
         });
 
         const billText = ocrRes.response?.trim() || "";
 
         if (!billText) {
-          throw new Error("Failed to extract text from bill. Try a clearer image or PDF.");
+          throw new Error("Could not extract text from the uploaded bill. Try a clearer image or PDF.");
         }
 
+        // Paywall logic
         const isPaid = !!sessionId;
 
-        const prompt = `You are an expert medical billing assistant helping patients understand their bills.
+        const prompt = `You are an expert medical billing assistant.
 
 Explain this bill in simple, easy-to-understand language.
 
-Break it down clearly:
+Break down:
 • Total amount owed by the patient
 • Key services/procedures and what they mean
 • Insurance coverage and adjustments
 • Patient responsibility
-• Explanation of important codes (CPT, ICD-10, etc.)
+• Explanation of codes (CPT, ICD-10, etc.)
 • Any red flags or recommended next steps
 
 Bill content:
 ${billText}
 
-${!isPaid ? "\n\nIMPORTANT: Give ONLY a short teaser summary (under 150 words) and end with: 'Upgrade for the full detailed explanation.'" : ""}`;
+${!isPaid ? "\n\nIMPORTANT: Provide ONLY a short teaser summary (under 150 words) and end with: 'Upgrade to get the full detailed explanation.'" : ""}`;
 
         const aiRes = await fetch("https://api.openai.com/v1/chat/completions", {
           method: "POST",
@@ -116,7 +129,7 @@ ${!isPaid ? "\n\nIMPORTANT: Give ONLY a short teaser summary (under 150 words) a
 
         if (!aiRes.ok) {
           const errText = await aiRes.text();
-          throw new Error(`OpenAI error: ${aiRes.status} – ${errText}`);
+          throw new Error(`OpenAI API error: ${aiRes.status} – ${errText}`);
         }
 
         const aiData = await aiRes.json();
@@ -127,13 +140,14 @@ ${!isPaid ? "\n\nIMPORTANT: Give ONLY a short teaser summary (under 150 words) a
         });
       } catch (err) {
         console.error("Worker error:", err);
-        return new Response(JSON.stringify({ error: err.message || "Processing failed" }), {
+        return new Response(JSON.stringify({ error: err.message || "Something went wrong" }), {
           status: 500,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
     }
 
+    // Default response
     return new Response("ExplainMyBill Worker API – POST a bill file to get an explanation.", {
       headers: corsHeaders,
     });

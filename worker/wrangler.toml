@@ -1,23 +1,21 @@
 name = "explain-my-bill"
 main = "src/index.js"
 compatibility_date = "2025-12-21"
-ompatibility_flags = ["nodejs_compat"]
 
+# Fixed typo: compatibility_flags (not ompatibility_flags)
+compatibility_flags = ["nodejs_compat"]
 
 [observability]
 enabled = false
-head_sampling_rate = 1
 
 [observability.logs]
 enabled = true
-head_sampling_rate = 1
 persist = true
 invocation_logs = true
 
 [observability.traces]
 enabled = true
 persist = true
-head_sampling_rate = 1
 
 [[kv_namespaces]]
 binding = "PAID_SESSIONS"

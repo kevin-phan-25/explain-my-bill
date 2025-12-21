@@ -1,4 +1,4 @@
-// ExplainMyBill Worker – Ultimate Full Feature Version
+// ExplainMyBill Worker – Full Feature + Multi-Page + Table-Aware + Live Preview + JSON Output
 // No npm dependencies needed!
 
 export default {
@@ -64,7 +64,7 @@ export default {
     }
 
     // -------------------
-    // 2️⃣ Explain Bill – Multi-page PDF/Image + Table-Aware GPT
+    // 2️⃣ Explain Bill – Multi-Page + Table-Aware + JSON Output
     // -------------------
     if (request.method === "POST") {
       try {
@@ -80,67 +80,75 @@ export default {
         }
 
         const isPaid = Boolean(sessionId);
-
         const arrayBuffer = await billFile.arrayBuffer();
-        let billText = "";
+        const MAX_BYTES_PER_PAGE = 1024 * 1024; // 1MB per page
+
+        let pages = [];
+        let pageIndex = 1;
 
         // -------------------
-        // Multi-page / PDF / Image Processing
+        // Multi-page processing
         // -------------------
-        try {
-          // Decode as UTF-8 (PDF with text layer / text file)
-          const decoder = new TextDecoder("utf-8", { fatal: false });
-          billText = decoder.decode(arrayBuffer);
-        } catch {
-          // fallback: base64 snippet (max 1MB)
-          const maxBytes = Math.min(arrayBuffer.byteLength, 1024 * 1024);
-          const slice = arrayBuffer.slice(0, maxBytes);
-          billText = btoa(String.fromCharCode(...new Uint8Array(slice)));
-          billText = `[BASE64_ENCODED_BILL_START]${billText}[BASE64_ENCODED_BILL_END]`;
+        for (let offset = 0; offset < arrayBuffer.byteLength; offset += MAX_BYTES_PER_PAGE) {
+          const slice = arrayBuffer.slice(offset, offset + MAX_BYTES_PER_PAGE);
+          let pageText = "";
+
+          try {
+            const decoder = new TextDecoder("utf-8", { fatal: false });
+            pageText = decoder.decode(slice);
+          } catch {
+            pageText = btoa(String.fromCharCode(...new Uint8Array(slice)));
+            pageText = `[BASE64_ENCODED_BILL_PAGE_${pageIndex}_START]${pageText}[BASE64_ENCODED_BILL_PAGE_${pageIndex}_END]`;
+          }
+
+          pages.push({ page: pageIndex, rawText: pageText });
+          pageIndex++;
         }
 
         // -------------------
-        // GPT Prompt – Full Table-Aware, Multi-Page Explanation
+        // Generate per-page GPT explanation
         // -------------------
-        const prompt = `You are an expert medical billing assistant.
-You will receive a medical or dental bill. Your tasks:
-1. Extract all text, including tables, CPT/ICD codes, charges, insurance adjustments, patient responsibility, totals.
-2. Detect multiple pages and combine content properly.
-3. Organize tables with rows and columns clearly.
-4. Explain the bill in **simple, easy-to-understand language**.
-5. Provide structured breakdown:
-   • Total amount owed by the patient
-   • Key services/procedures and their meaning
-   • Insurance coverage and adjustments
-   • Patient responsibility
-   • Explanation of codes (CPT, ICD-10, etc.)
-   • Any red flags or recommended next steps
+        for (let p of pages) {
+          const prompt = `You are an expert medical billing assistant.
+Explain the following page of a medical/dental bill. Include tables, CPT/ICD codes, charges, insurance adjustments, patient responsibility, totals, and simple explanations.
 
-Bill content:
-${billText}
+Page ${p.page} content:
+${p.rawText}
 
 ${!isPaid ? "\n\nIMPORTANT: Provide ONLY a short teaser summary (under 150 words) and end with: 'Upgrade to get the full detailed explanation.'" : ""}`;
 
-        const aiRes = await fetch("https://api.openai.com/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
-          },
-          body: JSON.stringify({
-            model: "gpt-4o-mini",
-            messages: [{ role: "user", content: prompt }],
-            temperature: 0.5,
-            max_tokens: isPaid ? 1500 : 300,
-          }),
-        });
+          const aiRes = await fetch("https://api.openai.com/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
+            },
+            body: JSON.stringify({
+              model: "gpt-4o-mini",
+              messages: [{ role: "user", content: prompt }],
+              temperature: 0.5,
+              max_tokens: isPaid ? 1000 : 300,
+            }),
+          });
 
-        const aiData = await aiRes.json().catch(() => ({}));
-        if (!aiRes.ok) throw new Error(`OpenAI explanation error: ${aiRes.status} – ${JSON.stringify(aiData)}`);
+          const aiData = await aiRes.json().catch(() => ({}));
+          if (!aiRes.ok) throw new Error(`OpenAI explanation error: ${aiRes.status} – ${JSON.stringify(aiData)}`);
 
-        const explanation = aiData.choices?.[0]?.message?.content?.trim() || "No explanation generated.";
+          const explanation = aiData.choices?.[0]?.message?.content?.trim() || "No explanation generated.";
+          p.explanation = explanation;
+          p.snippet = explanation.substring(0, 200); // preview snippet
+        }
 
-        return new Response(JSON.stringify({ explanation, isPaid }), {
+        // -------------------
+        // Combine full document explanation
+        // -------------------
+        const fullExplanation = pages.map(p => `Page ${p.page}:\n${p.explanation}`).join("\n\n");
+
+        return new Response(JSON.stringify({
+          isPaid,
+          pages,
+          fullExplanation
+        }), {
           headers: { "Content-Type": "application/json", ...corsHeaders },
         });
       } catch (err) {

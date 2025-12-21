@@ -13,21 +13,25 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # Step 1: Checkout the repo
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      # Step 2: Set up Node.js
       - name: Set up Node.js
         uses: actions/setup-node@v3
         with:
           node-version: '20'
 
-      - name: Install Dependencies
-        run: npm install
+      # Step 3: Install dependencies for Worker
+      - name: Install dependencies
+        run: npm ci
         working-directory: worker
 
+      # Step 4: Deploy Worker
       - name: Deploy Worker
-        run: npx wrangler deploy src/index.js --cwd worker
+        run: npx wrangler deploy src/index.js
+        working-directory: worker
         env:
-          apiToken: ${{ secrets.CF_API_TOKEN }}
-          accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}

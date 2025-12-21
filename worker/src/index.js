@@ -10,22 +10,26 @@ export default {
     const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
     };
 
     if (request.method === "OPTIONS") {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // Initialize Stripe with secret from env (set in dashboard)
-    const stripe = new Stripe(env.STRIPE_SECRET_KEY);
+    // Initialize Stripe (secret key from Workers dashboard/env)
+    const stripe = new Stripe(env.STRIPE_SECRET_KEY ?? '');
 
-    // Create Checkout Session for payment
+    // Endpoint: Create Stripe Checkout Session
     if (url.pathname === "/create-checkout-session" && request.method === "POST") {
       try {
         const { plan } = await request.json();
 
-        // Replace these with your actual Stripe Price IDs
+        if (!['monthly', 'one-time'].includes(plan)) {
+          throw new Error("Invalid plan");
+        }
+
+        // TODO: Replace with your real Stripe Price IDs from dashboard
         const priceId = plan === "monthly"
           ? "price_1YourMonthlyPriceIDHere"
           : "price_1YourOneTimePriceIDHere";
@@ -42,39 +46,42 @@ export default {
           headers: { "Content-Type": "application/json", ...corsHeaders },
         });
       } catch (err) {
+        console.error("Stripe error:", err);
         return new Response(JSON.stringify({ error: err.message }), {
           status: 500,
-          headers: corsHeaders,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
     }
 
-    // Optional webhook endpoint (for production use later)
+    // Placeholder webhook (expand later with signature verification)
     if (url.pathname === "/webhook" && request.method === "POST") {
-      return new Response("Webhook received", { status: 200 });
+      return new Response("Webhook received – implement signature verification", { status: 200 });
     }
 
-    // Main endpoint: Explain the bill
+    // Main endpoint: Explain the bill (POST with multipart/form-data)
     if (request.method === "POST") {
       try {
         const formData = await request.formData();
         const billFile = formData.get("bill");
-        const sessionId = formData.get("sessionId") || new URLSearchParams(url.search).get("session_id");
+        const sessionId = formData.get("sessionId") || url.searchParams.get("session_id");
 
-        let billText = formData.get("text") || "";
+        let billText = "";
 
-        // OCR: Extract text from uploaded image/PDF using Workers AI Vision model
+        // OCR extraction using Workers AI (supports images & PDFs)
         if (billFile && billFile.size > 0) {
           const imageBytes = new Uint8Array(await billFile.arrayBuffer());
+
           const ocrRes = await env.AI.run("@cf/meta/llama-3.2-vision-instruct", {
             image: [...imageBytes],
-            prompt: "Extract all visible text from this medical or dental bill exactly as shown. Include procedure codes, dates, amounts, descriptions, insurance adjustments, and patient responsibility.",
+            prompt: "Extract all visible text from this medical or dental bill exactly as shown. Include procedure codes, dates, amounts, descriptions, insurance adjustments, and patient responsibility. Preserve formatting where possible.",
             max_tokens: 1024,
           });
-          billText = ocrRes.response?.trim() || billText;
+
+          billText = ocrRes.response?.trim() || "";
         }
 
-        // Simple paywall logic (upgrade later with KV for real persistence)
+        // Paywall: Simple check (replace with KV lookup + webhook verification later)
         const isPaid = !!sessionId;
 
         const prompt = `You are an expert medical billing assistant helping patients understand their bills.
@@ -90,11 +97,11 @@ Break it down clearly:
 • Any red flags or recommended next steps
 
 Bill content:
-${billText}
+${billText || "No text extracted – please upload a clear image/PDF of the bill."}
 
-${!isPaid ? "\n\nIMPORTANT: Give ONLY a short teaser summary (under 150 words) and end with: 'Full detailed explanation requires payment.'" : ""}`;
+${!isPaid ? "\n\nIMPORTANT: Give ONLY a short teaser summary (under 150 words) and end with: 'Upgrade to get the full detailed explanation.'" : ""}`;
 
-        // Call OpenAI using secret from env
+        // Call OpenAI GPT-4o
         const aiRes = await fetch("https://api.openai.com/v1/chat/completions", {
           method: "POST",
           headers: {
@@ -105,29 +112,30 @@ ${!isPaid ? "\n\nIMPORTANT: Give ONLY a short teaser summary (under 150 words) a
             model: "gpt-4o",
             messages: [{ role: "user", content: prompt }],
             temperature: 0.5,
-            max_tokens: 1500,
+            max_tokens: isPaid ? 1500 : 300,
           }),
         });
 
+        if (!aiRes.ok) throw new Error(`OpenAI error: ${aiRes.status}`);
+
         const aiData = await aiRes.json();
-        const explanation = aiData.choices?.[0]?.message?.content?.trim() || "Sorry, I couldn't generate an explanation at this time.";
+        const explanation = aiData.choices?.[0]?.message?.content?.trim() || "No explanation generated.";
 
         return new Response(
           JSON.stringify({ explanation, isPaid }),
-          {
-            headers: { "Content-Type": "application/json", ...corsHeaders },
-          }
+          { headers: { "Content-Type": "application/json", ...corsHeaders } }
         );
       } catch (err) {
+        console.error("Worker error:", err);
         return new Response(
           JSON.stringify({ error: "Something went wrong: " + err.message }),
-          { status: 500, headers: corsHeaders }
+          { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
     }
 
-    // Default response
-    return new Response("ExplainMyBill API – POST a bill to explain it", {
+    // Default
+    return new Response("ExplainMyBill Worker API – POST a bill file to / for explanation", {
       status: 200,
       headers: corsHeaders,
     });

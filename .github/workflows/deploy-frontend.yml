@@ -1,3 +1,5 @@
+# .github/workflows/deploy-frontend.yml (full updated file)
+
 name: Deploy Frontend
 
 on:
@@ -5,7 +7,7 @@ on:
     branches:
       - main
     paths:
-      - 'frontend/**'            # Only run if files in frontend/ change
+      - 'frontend/**'
       - '.github/workflows/deploy-frontend.yml'
 
 jobs:
@@ -30,7 +32,7 @@ jobs:
           cd frontend
           npm run build
 
-      - name: Move build output to root for Cloudflare Pages
+      - name: Move build to root (for Create React App preset)
         run: |
           mv frontend/build build
 
@@ -39,5 +41,5 @@ jobs:
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          projectName: explainmybill
+          projectName: explain-my-bill   # ← Fixed: now matches your actual project
           directory: build

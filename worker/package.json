@@ -1,8 +1,9 @@
 {
-  "name": "worker",
+  "name": "explain-my-bill-worker",
   "version": "1.0.0",
   "private": true,
+  "main": "src/index.js",
   "dependencies": {
-    "stripe": "^16.0.0"
+    "stripe": "^16.12.0"
   }
 }

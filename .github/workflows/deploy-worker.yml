@@ -16,6 +16,6 @@ jobs:
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          workingDirectory: worker        # Go into worker/ folder
-          command: deploy                 # Explicit deploy command (v3 understands this)
+          workingDirectory: worker
+          command: deploy src/index.js  # ← This explicitly tells Wrangler the entry point
           packageManager: npm

@@ -1,4 +1,4 @@
-// ExplainMyBill Worker – Modernized, Full Feature Upgrade
+// ExplainMyBill Worker – Full Feature Upgrade with Table-Aware OCR
 // No npm dependencies needed!
 
 export default {
@@ -16,7 +16,7 @@ export default {
     }
 
     // -------------------
-    // Create Checkout Session
+    // 1️⃣ Create Checkout Session
     // -------------------
     if (url.pathname === "/create-checkout-session" && request.method === "POST") {
       try {
@@ -64,7 +64,7 @@ export default {
     }
 
     // -------------------
-    // Explain Bill
+    // 2️⃣ Explain Bill – OCR + Table Parsing + GPT Explanation
     // -------------------
     if (request.method === "POST") {
       try {
@@ -80,18 +80,18 @@ export default {
         }
 
         // -------------------
-        // Convert file to smaller payload
+        // File Processing
         // -------------------
         const arrayBuffer = await billFile.arrayBuffer();
         let billText = "";
 
         try {
-          // Attempt to decode as UTF-8 text if possible
+          // Decode as UTF-8 text if possible
           const decoder = new TextDecoder("utf-8", { fatal: false });
           billText = decoder.decode(arrayBuffer);
         } catch {
-          // fallback: send small base64 (first 1MB max)
-          const maxBytes = Math.min(arrayBuffer.byteLength, 1024 * 1024); // 1MB
+          // Fallback: base64 (max 1MB)
+          const maxBytes = Math.min(arrayBuffer.byteLength, 1024 * 1024);
           const slice = arrayBuffer.slice(0, maxBytes);
           billText = btoa(String.fromCharCode(...new Uint8Array(slice)));
           billText = `[BASE64_ENCODED_BILL_START]${billText}[BASE64_ENCODED_BILL_END]`;
@@ -100,20 +100,25 @@ export default {
         const isPaid = Boolean(sessionId);
 
         // -------------------
-        // Generate Explanation via OpenAI
+        // GPT Prompt – Table Aware + Structured Explanation
         // -------------------
         const prompt = `You are an expert medical billing assistant.
-Explain this bill in simple, easy-to-understand language.
-Break down:
-• Total amount owed by the patient
-• Key services/procedures and what they mean
-• Insurance coverage and adjustments
-• Patient responsibility
-• Explanation of codes (CPT, ICD-10, etc.)
-• Any red flags or recommended next steps
+You receive a medical or dental bill. Your job is to:
+1. Extract all text, including tables, CPT/ICD codes, charges, insurance adjustments, patient responsibility, totals.
+2. Explain the bill in **simple, easy-to-understand language**.
+3. Break down:
+   • Total amount owed by the patient
+   • Key services/procedures and what they mean
+   • Insurance coverage and adjustments
+   • Patient responsibility
+   • Explanation of codes (CPT, ICD-10, etc.)
+   • Any red flags or recommended next steps
+
 Bill content:
 ${billText}
-${!isPaid ? "\n\nIMPORTANT: Provide ONLY a short teaser summary (under 150 words) and end with: 'Upgrade to get the full detailed explanation.'" : ""}`;
+
+${!isPaid ? "\n\nIMPORTANT: Provide ONLY a short teaser summary (under 150 words) and end with: 'Upgrade to get the full detailed explanation.'" : ""}
+`;
 
         const aiRes = await fetch("https://api.openai.com/v1/chat/completions", {
           method: "POST",

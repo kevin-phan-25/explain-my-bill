@@ -1,6 +1,4 @@
-// worker/src/index.js
-
-import Stripe from 'stripe';
+import Stripe from "stripe";
 
 export default {
   async fetch(request, env, ctx) {
@@ -16,21 +14,18 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    const stripe = new Stripe(env.STRIPE_SECRET_KEY ?? '');
+    const stripe = new Stripe(env.STRIPE_SECRET_KEY ?? "");
 
-    // Create Checkout Session
     if (url.pathname === "/create-checkout-session" && request.method === "POST") {
       try {
         const { plan } = await request.json();
-
-        if (!['monthly', 'one-time'].includes(plan)) {
+        if (!["monthly", "one-time"].includes(plan)) {
           return new Response(JSON.stringify({ error: "Invalid plan" }), {
             status: 400,
             headers: { ...corsHeaders, "Content-Type": "application/json" },
           });
         }
 
-        // TODO: Replace with your real Stripe Price IDs
         const priceId = plan === "monthly"
           ? "price_1YourMonthlyPriceIDHere"
           : "price_1YourOneTimePriceIDHere";
@@ -55,11 +50,6 @@ export default {
       }
     }
 
-    // Webhook placeholder
-    if (url.pathname === "/webhook" && request.method === "POST") {
-      return new Response("Webhook endpoint – add signature verification for production", { status: 200 });
-    }
-
     // Main bill explanation endpoint
     if (request.method === "POST") {
       try {
@@ -71,13 +61,11 @@ export default {
 
         if (billFile && billFile.size > 0) {
           const imageBytes = new Uint8Array(await billFile.arrayBuffer());
-
           const ocrRes = await env.AI.run("@cf/meta/llama-3.2-vision-instruct", {
             image: [...imageBytes],
             prompt: "Extract all visible text from this medical or dental bill exactly as shown. Include procedure codes, dates, amounts, descriptions, insurance adjustments, and patient responsibility. Preserve tables and formatting.",
             max_tokens: 1024,
           });
-
           billText = ocrRes.response?.trim() || "";
         }
 
@@ -85,8 +73,7 @@ export default {
           throw new Error("No text extracted from bill – please upload a clear image or PDF.");
         }
 
-        const isPaid = !!sessionId;  // Replace with real verification later (webhook + KV)
-
+        const isPaid = !!sessionId;
         const prompt = `You are an expert medical billing assistant.
 
 Explain this bill in simple language.

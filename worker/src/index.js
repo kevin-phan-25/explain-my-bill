@@ -12,7 +12,7 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // ── Create Checkout Session via Stripe REST API ──
+    // ── Stripe Checkout Session via REST API ──
     if (url.pathname === "/create-checkout-session" && request.method === "POST") {
       try {
         const { plan } = await request.json();
@@ -25,7 +25,7 @@ export default {
         }
 
         const priceId = plan === "monthly"
-          ? "price_123monthly" // Replace with your real Stripe Price IDs
+          ? "price_123monthly"
           : "price_123one";
 
         const params = new URLSearchParams({
@@ -51,7 +51,6 @@ export default {
         }
 
         const session = await stripeRes.json();
-
         return new Response(JSON.stringify({ id: session.id }), {
           headers: { "Content-Type": "application/json", ...corsHeaders },
         });
@@ -64,7 +63,7 @@ export default {
       }
     }
 
-    // ── Main: Explain Bill ──
+    // ── Explain Bill ──
     if (request.method === "POST") {
       try {
         const formData = await request.formData();
@@ -80,7 +79,7 @@ export default {
 
         const imageBytes = new Uint8Array(await billFile.arrayBuffer());
 
-        // OCR with Cloudflare Workers AI Vision model
+        // OCR
         const ocrRes = await env.AI.run("@cf/meta/llama-3.2-3b-instruct", {
           image: [...imageBytes],
           prompt: "Extract all visible text from this bill exactly as shown. Include dates, procedure codes (CPT), diagnosis codes (ICD-10), descriptions, charges, insurance adjustments, patient responsibility, and totals. Preserve formatting and tables.",
@@ -88,12 +87,8 @@ export default {
         });
 
         const billText = ocrRes.response?.trim() || "";
+        if (!billText) throw new Error("Could not extract text from the uploaded bill.");
 
-        if (!billText) {
-          throw new Error("Could not extract text from the uploaded bill. Try a clearer image or PDF.");
-        }
-
-        // Paywall logic
         const isPaid = !!sessionId;
 
         const prompt = `You are an expert medical billing assistant.
@@ -147,7 +142,6 @@ ${!isPaid ? "\n\nIMPORTANT: Provide ONLY a short teaser summary (under 150 words
       }
     }
 
-    // Default response
     return new Response("ExplainMyBill Worker API – POST a bill file to get an explanation.", {
       headers: corsHeaders,
     });

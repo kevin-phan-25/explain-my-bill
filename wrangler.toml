@@ -1,13 +1,15 @@
 name = "explain-my-bill"
-main = "src/index.js"
+main = "worker/src/index.js"
 compatibility_date = "2025-12-21"
 compatibility_flags = ["nodejs_compat"]
 
 [assets]
-directory = "../frontend/build" # ← change ONLY if output differs
+directory = "frontend/build"
 
-[observability]
-enabled = false
+[observability.logs]
+enabled = true
+persist = true
+invocation_logs = true
 
 [[kv_namespaces]]
 binding = "PAID_SESSIONS"

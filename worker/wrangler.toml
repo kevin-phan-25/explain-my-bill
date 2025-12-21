@@ -2,6 +2,9 @@ name = "explain-my-bill"
 main = "src/index.js"
 compatibility_date = "2025-12-21"
 
+# Essential for Stripe and other Node.js-dependent packages
+compatibility_flags = ["nodejs_compat"]
+
 [observability]
 enabled = false
 head_sampling_rate = 1

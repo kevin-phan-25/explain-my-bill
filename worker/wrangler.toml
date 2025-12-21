@@ -2,14 +2,13 @@ name = "explain-my-bill"
 main = "src/index.js"
 compatibility_date = "2025-12-21"
 
-# Optional KV namespace for persistent paid sessions
-# [[kv_namespaces]]
-# binding = "PAID_SESSIONS"
-# id = "5c80b0fbb48b4a708d55806ae6788dc5"
-
 [observability]
   [observability.logs]
   enabled = false
   head_sampling_rate = 1
   invocation_logs = true
   persist = true
+
+[[kv_namespaces]]
+binding = "PAID_SESSIONS"
+id = "5c80b0fbb48b4a708d55806ae6788dc5"

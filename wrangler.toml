@@ -3,14 +3,8 @@ main = "worker/src/index.js"
 compatibility_date = "2025-12-21"
 compatibility_flags = ["nodejs_compat"]
 
-# Serve static build output from frontend/dist (default Vite)
 [assets]
-directory = "frontend/dist"
-
-[observability.logs]
-enabled = true
-persist = true
-invocation_logs = true
+directory = "frontend/build"
 
 [[kv_namespaces]]
 binding = "PAID_SESSIONS"

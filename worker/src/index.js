@@ -1,5 +1,4 @@
-// worker/src/index.js - No npm dependencies needed!
-
+// No npm dependencies needed!
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -10,12 +9,12 @@ export default {
       "Access-Control-Allow-Headers": "Content-Type",
     };
 
-    // Handle preflight requests
+    // Preflight request
     if (request.method === "OPTIONS") {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // Create Checkout Session using direct Stripe API
+    // Create Checkout Session
     if (url.pathname === "/create-checkout-session" && request.method === "POST") {
       try {
         const { plan } = await request.json().catch(() => ({}));
@@ -27,8 +26,8 @@ export default {
         }
 
         const priceId = plan === "monthly"
-          ? "price_YourMonthlyPriceID"  // Replace with real
-          : "price_YourOneTimePriceID"; // Replace with real
+          ? "price_YourMonthlyPriceID"
+          : "price_YourOneTimePriceID";
 
         const stripeRes = await fetch("https://api.stripe.com/v1/checkout/sessions", {
           method: "POST",
@@ -61,11 +60,11 @@ export default {
       }
     }
 
-    // Main: Explain Bill (OCR + AI)
+    // Explain Bill
     if (request.method === "POST") {
       try {
         const formData = await request.formData();
-        const billFile = formData.get("bill");
+        const billFile = formData.get("bill"); // MUST match frontend key
         const sessionId = formData.get("sessionId") || url.searchParams.get("session_id");
 
         if (!billFile || (billFile.size ?? 0) === 0) {
@@ -84,9 +83,7 @@ export default {
         });
 
         const billText = ocrRes.response?.trim() || "";
-        if (!billText) {
-          throw new Error("Could not extract text from the bill. Try a clearer image or PDF.");
-        }
+        if (!billText) throw new Error("Could not extract text from the bill. Try a clearer image or PDF.");
 
         const isPaid = Boolean(sessionId);
 
@@ -118,10 +115,7 @@ ${!isPaid ? "\n\nIMPORTANT: Provide ONLY a short teaser summary (under 150 words
         });
 
         const aiData = await aiRes.json().catch(() => ({}));
-        if (!aiRes.ok) {
-          const errText = JSON.stringify(aiData) || "No response from OpenAI";
-          throw new Error(`OpenAI error: ${aiRes.status} – ${errText}`);
-        }
+        if (!aiRes.ok) throw new Error(`OpenAI error: ${aiRes.status} – ${JSON.stringify(aiData)}`);
 
         const explanation = aiData.choices?.[0]?.message?.content?.trim() || "No explanation generated.";
 

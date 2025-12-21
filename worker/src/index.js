@@ -68,7 +68,7 @@ export default {
 
         const imageBytes = new Uint8Array(await billFile.arrayBuffer());
 
-        // Best vision model for OCR
+        // Best available vision model for accurate OCR
         const ocrRes = await env.AI.run("@cf/meta/llama-3.2-11b-vision-instruct", {
           image: [...imageBytes],
           prompt: "Extract all visible text from this bill exactly as shown. Include dates, procedure codes (CPT), diagnosis codes (ICD-10), descriptions, charges, insurance adjustments, patient responsibility, and totals. Preserve table formatting as much as possible.",
@@ -78,7 +78,7 @@ export default {
         const billText = ocrRes.response?.trim() || "";
 
         if (!billText) {
-          throw new Error("Failed to extract text from bill. Try a clearer image or PDF.");
+          throw new Error("Failed to extract text from the bill. Please try a clearer image or PDF.");
         }
 
         const isPaid = !!sessionId;
@@ -134,6 +134,7 @@ ${!isPaid ? "\n\nIMPORTANT: Give ONLY a short teaser summary (under 150 words) a
       }
     }
 
+    // Default response
     return new Response("ExplainMyBill Worker API – POST a bill file to get an explanation.", {
       headers: corsHeaders,
     });

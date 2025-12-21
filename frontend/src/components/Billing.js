@@ -1,25 +1,21 @@
-import { useEffect } from "react";
 import { loadStripe } from "@stripe/stripe-js";
+import { createCheckoutSession } from "../api";
 
-const stripePromise = loadStripe("pk_test_YourStripePublicKey");
+const stripePromise = loadStripe("pk_test_YourPublishableKey");
 
-export default function Billing() {
+export default function Billing({ setSessionId }) {
   const handleCheckout = async (plan) => {
-    const res = await fetch("/create-checkout-session", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ plan }) // "one-time" or "monthly"
-    });
-    const data = await res.json();
+    const { id } = await createCheckoutSession(plan);
     const stripe = await stripePromise;
-    stripe.redirectToCheckout({ sessionId: data.id });
+    const { error } = await stripe.redirectToCheckout({ sessionId: id });
+    if (error) console.error(error);
   };
 
   return (
     <div>
-      <button onClick={() => handleCheckout("one-time")}>Pay $4.99 for one bill</button>
-      <button onClick={() => handleCheckout("monthly")}>Subscribe $15.99/month</button>
+      <h2>Unlock Full Explanations</h2>
+      <button onClick={() => handleCheckout("one-time")}>$4.99 – One Bill Explanation</button>
+      <button onClick={() => handleCheckout("monthly")}>$15.99/month – Unlimited</button>
     </div>
   );
 }
-

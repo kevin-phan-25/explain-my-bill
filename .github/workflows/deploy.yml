@@ -10,53 +10,40 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # 1) Checkout repo
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 2) Setup Node
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      # -------------------------
-      # FRONTEND BUILD
-      # -------------------------
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm install
-
-      - name: Build frontend
-        working-directory: frontend
-        run: npm run build
-
-      - name: Detect frontend build output
+      # 3) Build frontend
+      - name: Install and build frontend
         run: |
-          echo "=== frontend root ==="
+          cd frontend
+          npm install
+          npm run build
+
+      - name: Verify frontend build output
+        run: |
+          echo "Listing frontend folder:"
           ls -la frontend
+          echo "Listing frontend dist:"
+          ls -la frontend/dist || echo "No dist folder found"
 
-          echo "=== candidate build dirs ==="
-          for dir in build dist out .output/public; do
-            if [ -d "frontend/$dir" ]; then
-              echo "FOUND BUILD DIR: frontend/$dir"
-            fi
-          done
-
-          echo "=== full frontend tree (depth 2) ==="
-          find frontend -maxdepth 2 -type d
-
-      # -------------------------
-      # WORKER INSTALL
-      # -------------------------
+      # 4) Install worker dependencies
       - name: Install worker dependencies
-        working-directory: worker
-        run: npm install
+        run: |
+          cd worker
+          npm install
 
-      # -------------------------
-      # DEPLOY
-      # -------------------------
-      - name: Deploy Worker + Assets
-        working-directory: worker
-        run: npx wrangler deploy
+      # 5) Deploy to Cloudflare Worker
+      - name: Deploy to Cloudflare
+        run: |
+          npx wrangler deploy
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}

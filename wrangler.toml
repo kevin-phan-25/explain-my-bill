@@ -15,6 +15,11 @@ invocation_logs = true
 enabled = true
 persist = true
 
+[
+site
+]
+bucket = "frontend/build"
+
 [[kv_namespaces]]
 binding = "PAID_SESSIONS"
 id = "5c80b0fbb48b4a708d55806ae6788dc5"

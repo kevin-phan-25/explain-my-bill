@@ -18,29 +18,27 @@ jobs:
         with:
           node-version: '20'
 
-      # ---- FRONTEND ----
       - name: Install and build frontend
         run: |
           cd frontend
           npm install
           npm run build
-
-      - name: Verify frontend build output
-        run: |
-          echo "Frontend contents:"
-          ls -la frontend
-          echo "Build output:"
-          ls -la frontend/build
-
-      # ---- WORKER ----
+          # Ensure the build folder exists for Wrangler
+          rm -rf build
+          mkdir build
+          cp -r dist/* build/
+      
       - name: Install worker dependencies
         run: |
           cd worker
           npm install
 
-      # ---- DEPLOY ----
-      - name: Deploy Worker + Assets
+      - name: Verify frontend build
+        run: ls -la frontend/build
+
+      - name: Deploy to Cloudflare Worker with static assets
         run: npx wrangler deploy
+        working-directory: .
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}

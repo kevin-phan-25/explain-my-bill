@@ -14,7 +14,7 @@ jobs:
       - name: Deploy Worker
         uses: cloudflare/wrangler-action@v3
         with:
-          apiKey: ${{ secrets.CLOUDFLARE_API_KEY }}  
-          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          apiToken: ${{ secrets.CF_API_TOKEN }}      # Required — use your template token
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}    # Highly recommended
           workingDirectory: worker
           packageManager: npm

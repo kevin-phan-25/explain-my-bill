@@ -4,19 +4,17 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // ✅ CORS headers locked to your Render frontend
     const corsHeaders = {
-      "Access-Control-Allow-Origin": "https://explain-my-bill-frontend.onrender.com",
+      "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type",
     };
 
-    // Handle preflight requests
     if (request.method === "OPTIONS") {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // Create Checkout Session using Stripe
+    // Create Checkout Session using direct Stripe API
     if (url.pathname === "/create-checkout-session" && request.method === "POST") {
       try {
         const { plan } = await request.json();
@@ -42,8 +40,8 @@ export default {
             "line_items[0][price]": priceId,
             "line_items[0][quantity]": "1",
             "mode": plan === "monthly" ? "subscription" : "payment",
-            "success_url": "https://explain-my-bill-frontend.onrender.com/success?session_id={CHECKOUT_SESSION_ID}",
-            "cancel_url": "https://explain-my-bill-frontend.onrender.com/cancel",
+            "success_url": "https://explain-my-bill.pages.dev/success?session_id={CHECKOUT_SESSION_ID}",
+            "cancel_url": "https://explain-my-bill.pages.dev/cancel",
           }),
         });
 
@@ -62,7 +60,7 @@ export default {
       }
     }
 
-    // Main: Explain Bill (OCR + AI)
+    // Main: Explain Bill (your OCR + AI code)
     if (request.method === "POST") {
       try {
         const formData = await request.formData();
@@ -85,7 +83,9 @@ export default {
         });
 
         const billText = ocrRes.response?.trim() || "";
-        if (!billText) throw new Error("Could not extract text from the bill. Try a clearer image or PDF.");
+        if (!billText) {
+          throw new Error("Could not extract text from the bill. Try a clearer image or PDF.");
+        }
 
         const isPaid = !!sessionId;
 

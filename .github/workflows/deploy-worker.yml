@@ -14,8 +14,7 @@ jobs:
       - name: Deploy Worker
         uses: cloudflare/wrangler-action@v3
         with:
-          apiKey: ${{ secrets.CLOUDFLARE_API_KEY }}  # Uses global key + email
-          accountEmail: ${{ secrets.CLOUDFLARE_EMAIL }}
+          apiKey: ${{ secrets.CLOUDFLARE_API_KEY }}  
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
           workingDirectory: worker
           packageManager: npm

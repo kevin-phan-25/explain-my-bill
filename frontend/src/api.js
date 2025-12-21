@@ -1,4 +1,6 @@
-const WORKER_URL = "https://explain-my-bill.zerotoitsuccess.workers.dev";
+// frontend/src/api.js
+
+const WORKER_URL = "https://explain-my-bill.explainmybill.workers.dev";
 
 export async function createCheckoutSession(plan) {
   const res = await fetch(`${WORKER_URL}/create-checkout-session`, {

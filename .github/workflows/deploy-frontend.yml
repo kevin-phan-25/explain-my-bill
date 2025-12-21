@@ -1,4 +1,3 @@
-# .github/workflows/deploy-frontend.yml
 name: Deploy Frontend
 
 on:
@@ -20,17 +19,17 @@ jobs:
       - name: Install dependencies
         run: |
           cd frontend
-          npm install
+          npm install  # Generates package-lock.json automatically if missing
 
       - name: Build
         run: |
           cd frontend
-          npm run build
+          npm run build  # Creates frontend/build folder with static files
 
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/pages-action@v1
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          projectName: explainmybill  # Make sure this matches your Pages project name
-          directory: frontend/build
+          projectName: explainmybill  # Confirm this EXACTLY matches your Pages project name in dashboard
+          directory: frontend/build  # CRA outputs to build/, then we deploy that

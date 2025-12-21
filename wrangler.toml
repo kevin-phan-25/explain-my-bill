@@ -3,6 +3,9 @@ main = "worker/src/index.js"
 compatibility_date = "2025-12-21"
 compatibility_flags = ["nodejs_compat"]
 
+[site]
+bucket = "frontend/build"
+
 [observability]
 enabled = false
 
@@ -14,11 +17,6 @@ invocation_logs = true
 [observability.traces]
 enabled = true
 persist = true
-
-[
-site
-]
-bucket = "frontend/build"
 
 [[kv_namespaces]]
 binding = "PAID_SESSIONS"

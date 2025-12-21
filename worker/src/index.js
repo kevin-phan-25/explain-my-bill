@@ -68,7 +68,7 @@ export default {
 
         const imageBytes = new Uint8Array(await billFile.arrayBuffer());
 
-        // Critical fix: Use a VISION model for OCR on images/PDFs
+        // Best vision model for OCR
         const ocrRes = await env.AI.run("@cf/meta/llama-3.2-11b-vision-instruct", {
           image: [...imageBytes],
           prompt: "Extract all visible text from this bill exactly as shown. Include dates, procedure codes (CPT), diagnosis codes (ICD-10), descriptions, charges, insurance adjustments, patient responsibility, and totals. Preserve table formatting as much as possible.",

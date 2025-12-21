@@ -25,7 +25,7 @@ jobs:
 
       # Step 3: Install dependencies for Worker
       - name: Install dependencies
-        run: npm ci
+        run: npm install
         working-directory: worker
 
       # Step 4: Deploy Worker

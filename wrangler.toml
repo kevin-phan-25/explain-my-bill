@@ -1,0 +1,24 @@
+name = "explain-my-bill"
+main = "worker/src/index.js"
+compatibility_date = "2025-12-21"
+compatibility_flags = ["nodejs_compat"]
+
+# Serve built React app as static assets
+[site]
+bucket = "frontend/build"
+
+[observability]
+enabled = false
+
+[observability.logs]
+enabled = true
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = true
+persist = true
+
+[[kv_namespaces]]
+binding = "PAID_SESSIONS"
+id = "5c80b0fbb48b4a708d55806ae6788dc5"

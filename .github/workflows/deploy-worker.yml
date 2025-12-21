@@ -21,7 +21,4 @@ jobs:
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
           workingDirectory: worker
           packageManager: npm
-          # Explicitly tell Wrangler to use the toml config
-          # This forces it to read wrangler.toml and main = "src/index.js"
-          preCommands: echo "Using wrangler.toml config"
-          # No command override — let it auto-detect
+          command: deploy src/index.js   # This explicitly sets the entry point

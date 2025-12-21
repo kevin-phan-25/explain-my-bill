@@ -10,16 +10,19 @@ function App() {
     const sess = params.get("session_id");
     if (sess) {
       setSessionId(sess);
-      // In prod: store in localStorage or cookie
       window.history.replaceState({}, "", "/");
     }
   }, []);
 
   return (
-    <div style={{ maxWidth: "800px", margin: "auto", padding: "20px" }}>
+    <div style={{ maxWidth: "800px", margin: "auto", padding: "20px", fontFamily: "sans-serif" }}>
       <h1>Explain My Bill</h1>
-      {!sessionId && <Billing setSessionId={setSessionId} />}
+      <p>Upload a medical or dental bill (PDF/image) or paste text — get a clear explanation.</p>
+
+      {!sessionId && <Billing />}
       <UploadBill sessionId={sessionId} />
+      
+      {sessionId && <p style={{ color: "green" }}>✅ Full explanation unlocked!</p>}
     </div>
   );
 }

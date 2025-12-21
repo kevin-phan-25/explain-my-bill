@@ -18,8 +18,10 @@ jobs:
         with:
           node-version: '20'
 
-      # ---------- FRONTEND ----------
-      - name: Install frontend deps
+      # -------------------------
+      # FRONTEND BUILD
+      # -------------------------
+      - name: Install frontend dependencies
         working-directory: frontend
         run: npm install
 
@@ -27,15 +29,31 @@ jobs:
         working-directory: frontend
         run: npm run build
 
-      # Optional sanity check (HIGHLY recommended)
-      - name: Verify frontend build output
-        run: ls -la frontend/dist
+      - name: Detect frontend build output
+        run: |
+          echo "=== frontend root ==="
+          ls -la frontend
 
-      # ---------- WORKER ----------
-      - name: Install worker deps
+          echo "=== candidate build dirs ==="
+          for dir in build dist out .output/public; do
+            if [ -d "frontend/$dir" ]; then
+              echo "FOUND BUILD DIR: frontend/$dir"
+            fi
+          done
+
+          echo "=== full frontend tree (depth 2) ==="
+          find frontend -maxdepth 2 -type d
+
+      # -------------------------
+      # WORKER INSTALL
+      # -------------------------
+      - name: Install worker dependencies
         working-directory: worker
         run: npm install
 
+      # -------------------------
+      # DEPLOY
+      # -------------------------
       - name: Deploy Worker + Assets
         working-directory: worker
         run: npx wrangler deploy

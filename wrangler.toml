@@ -3,8 +3,8 @@ main = "worker/src/index.js"
 compatibility_date = "2025-12-21"
 compatibility_flags = ["nodejs_compat"]
 
-[site]
-bucket = "frontend/build"   # <- must match the actual build output folder
+[env.production]
+vars = { STRIPE_SECRET_KEY = "$STRIPE_SECRET_KEY", OPENAI_API_KEY = "$OPENAI_API_KEY" }
 
 [[kv_namespaces]]
 binding = "PAID_SESSIONS"

@@ -8,6 +8,7 @@ export async function createCheckoutSession(plan) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ plan }),
   });
+  if (!res.ok) throw new Error("Payment setup failed");
   return res.json();
 }
 
@@ -16,5 +17,6 @@ export async function explainBill(formData) {
     method: "POST",
     body: formData,
   });
+  if (!res.ok) throw new Error("Explanation failed");
   return res.json();
 }

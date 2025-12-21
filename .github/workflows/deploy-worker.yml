@@ -11,8 +11,10 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
       - name: Set up Node.js
         uses: actions/setup-node@v3
@@ -20,7 +22,7 @@ jobs:
           node-version: '20'
 
       - name: Install Dependencies
-        run: npm install
+        run: npm ci
         working-directory: worker
 
       - name: Deploy Worker
@@ -28,7 +30,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          workingDirectory: worker
+          workingDirectory: worker     # points to worker folder
           packageManager: npm
-          command: deploy src/index.js
+          command: deploy src/index.js # explicit entry point
           wranglerVersion: "latest"

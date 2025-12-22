@@ -1,6 +1,6 @@
 // worker/src/index.js
 // ExplainMyBill Worker – Full Premium Features for Paid Users
-// All previous features preserved + robust key loading
+// All previous features preserved
 
 export default {
   async fetch(request, env, ctx) {
@@ -63,7 +63,7 @@ export default {
     }
 
     // -------------------
-    // 2️⃣ Explain Bill – Google Vision + OpenAI Vision Fallback
+    // 2️⃣ Explain Bill – Google Vision OCR + All Features
     // -------------------
     if (request.method === "POST") {
       try {
@@ -96,80 +96,44 @@ export default {
           const bytes = new Uint8Array(arrayBuffer);
           const base64 = btoa(String.fromCharCode(...bytes));
 
-          let extractedText = "";
-
           // -------------------
-          // Try Google Vision first (with exact secret name)
+          // Google Vision OCR (standard secret name)
           // -------------------
-          const googleKey = env["GOOGLE_VISION_API KEY"] || env.GOOGLE_VISION_API_KEY;
-          if (googleKey) {
-            try {
-              const visionRes = await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${googleKey}`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  requests: [{
-                    image: { content: base64 },
-                    features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
-                  }],
-                }),
-              });
-
-              const visionData = await visionRes.json();
-              if (visionRes.ok && visionData.responses?.[0]?.fullTextAnnotation?.text) {
-                extractedText = visionData.responses[0].fullTextAnnotation.text;
-              }
-            } catch (e) {
-              console.warn("Google Vision failed:", e);
-            }
+          const visionKey = env.GOOGLE_VISION_API_KEY;
+          if (!visionKey) {
+            throw new Error("Google Vision API key not configured (check secret name: GOOGLE_VISION_API_KEY)");
           }
 
-          // -------------------
-          // Fallback to OpenAI Vision
-          // -------------------
-          const openaiKey = env.OPENAI_API_KEY;
-          if (!extractedText && openaiKey) {
-            try {
-              const ocrRes = await fetch("https://api.openai.com/v1/chat/completions", {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  "Authorization": `Bearer ${openaiKey}`,
-                },
-                body: JSON.stringify({
-                  model: "gpt-4o",
-                  messages: [
-                    {
-                      role: "user",
-                      content: [
-                        { type: "text", text: "Extract all visible text from this bill exactly as shown. Preserve tables, codes, and layout." },
-                        { type: "image_url", image_url: { url: `data:${fileType};base64,${base64}` } },
-                      ],
-                    },
-                  ],
-                  max_tokens: 1024,
-                }),
-              });
+          const visionRes = await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${visionKey}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              requests: [{
+                image: { content: base64 },
+                features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+              }],
+            }),
+          });
 
-              const ocrData = await ocrRes.json();
-              if (ocrRes.ok) {
-                extractedText = ocrData.choices?.[0]?.message?.content?.trim() || "[No text extracted]";
-              }
-            } catch (e) {
-              console.error("OpenAI vision fallback failed:", e);
-              extractedText = "[Failed to extract text]";
-            }
+          const visionData = await visionRes.json();
+          if (!visionRes.ok) {
+            console.error("Vision API response:", visionData);
+            throw new Error(visionData.error?.message || "Google Vision API error");
           }
 
-          // Split into pages
-          const pageTexts = extractedText.split(/\f/).map(t => t.trim()).filter(t => t.length > 0);
-          pages = pageTexts.length > 0
-            ? pageTexts.map((text, i) => ({ page: i + 1, rawText: text }))
-            : [{ page: 1, rawText: extractedText }];
+          const fullText = visionData.responses[0]?.fullTextAnnotation?.text || "[No text extracted]";
+
+          const pageTexts = fullText.split(/\f/).map(t => t.trim()).filter(t => t.length > 0);
+          if (pageTexts.length === 0) pageTexts.push(fullText.trim());
+
+          pages = pageTexts.map((text, i) => ({
+            page: i + 1,
+            rawText: text || "[No text extracted]",
+          }));
         }
 
         // -------------------
-        // Generate explanations
+        // Generate per-page explanation + paid features
         // -------------------
         for (let p of pages) {
           let prompt = `You are an expert medical billing assistant.
@@ -215,6 +179,9 @@ Suggest next steps if something looks wrong.`;
 
         const fullExplanation = pages.map(p => `Page ${p.page}:\n${p.explanation}`).join("\n\n");
 
+        // -------------------
+        // Paid-only features
+        // -------------------
         let paidFeatures = {};
         if (isPaid) {
           paidFeatures = {

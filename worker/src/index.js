@@ -1,7 +1,6 @@
 // worker/src/index.js
 // ExplainMyBill Worker – Full Premium Features for Paid Users
 // All previous features preserved + new paid-only features
-// OCR via Google Cloud Vision API
 
 export default {
   async fetch(request, env, ctx) {
@@ -97,8 +96,10 @@ export default {
           const bytes = new Uint8Array(arrayBuffer);
           const base64 = btoa(String.fromCharCode(...bytes));
 
-          // Check if API key exists
-          if (!env.GOOGLE_VISION_API_KEY || env.GOOGLE_VISION_API_KEY.trim() === '') {
+          // -------------------
+          // Google Cloud Vision OCR – Fixed Key Usage
+          // -------------------
+          if (!env.GOOGLE_VISION_API_KEY) {
             throw new Error("Google Vision API key not configured in worker secrets");
           }
 
@@ -114,11 +115,9 @@ export default {
           });
 
           const visionData = await visionRes.json();
-          console.log("Vision API response:", JSON.stringify(visionData)); // Debug log
-
           if (!visionRes.ok) {
-            const errMsg = visionData.error?.message || "Unknown Vision API error";
-            throw new Error(`Google Vision API error: ${errMsg}`);
+            console.error("Vision API response:", visionData);
+            throw new Error(visionData.error?.message || "Google Vision API error");
           }
 
           const fullText = visionData.responses[0]?.fullTextAnnotation?.text || "[No text extracted]";

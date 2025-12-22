@@ -1,7 +1,7 @@
 // worker/src/index.js
 // ExplainMyBill Worker – Full Feature + Multi-Page + Table-Aware + Live Preview + JSON Output
-// Uses OpenAI gpt-4o for both OCR (vision) and explanation
-// No Cloudflare AI — all AI via OpenAI_API_KEY
+// OCR via Tesseract.js (robust for scanned PDFs) + GPT explanation via OpenAI
+// Handles large PDFs with limits and error handling
 
 export default {
   async fetch(request, env, ctx) {
@@ -64,7 +64,7 @@ export default {
     }
 
     // -------------------
-    // 2️⃣ Explain Bill – Multi-Page + Vision OCR + GPT Explanation (All via OpenAI)
+    // 2️⃣ Explain Bill – Tesseract.js OCR + GPT Explanation
     // -------------------
     if (request.method === "POST") {
       try {
@@ -81,48 +81,73 @@ export default {
 
         const isPaid = Boolean(sessionId);
         const arrayBuffer = await billFile.arrayBuffer();
-        const MAX_BYTES_PER_PAGE = 1024 * 1024 * 4; // 4MB per page (OpenAI vision supports larger)
+
+        // -------------------
+        // File size and type validation (large PDF handling)
+        // -------------------
+        const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB limit
+        const MAX_PAGES = 20; // Prevent abuse
+
+        if (arrayBuffer.byteLength > MAX_FILE_SIZE) {
+          throw new Error("File too large. Maximum 20MB allowed.");
+        }
+
+        // -------------------
+        // Load Tesseract.js from CDN
+        // -------------------
+        const { createWorker } = Tesseract;
+
+        const worker = await createWorker('eng', 1, {
+          logger: m => console.log(m), // Optional logging
+          workerPath: 'https://unpkg.com/tesseract.js@5.1.0/dist/worker.min.js',
+          corePath: 'https://unpkg.com/tesseract.js-core@5.1.0/tesseract-core.wasm.js',
+          langPath: 'https://tesseract.projectnaptha.com/lang-data/5.0.0_best',
+        });
 
         let pages = [];
         let pageIndex = 1;
 
         // -------------------
-        // Multi-page processing (chunk by size)
+        // Process as image or multi-page PDF
         // -------------------
-        for (let offset = 0; offset < arrayBuffer.byteLength; offset += MAX_BYTES_PER_PAGE) {
-          const slice = arrayBuffer.slice(offset, offset + MAX_BYTES_PER_PAGE);
-          const bytes = new Uint8Array(slice);
+        if (billFile.type === "application/pdf") {
+          // Use pdf.js to extract pages as images
+          const pdfjsLib = await import("https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs");
+          pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs";
 
-          // Convert to base64 for OpenAI vision
-          const base64 = btoa(String.fromCharCode(...bytes));
+          const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise;
+          const numPages = Math.min(pdf.numPages, MAX_PAGES);
 
-          const content = [
-            { type: "text", text: "Extract all visible text from this bill page exactly as shown. Include dates, procedure codes (CPT), diagnosis codes (ICD-10), descriptions, charges, insurance adjustments, patient responsibility, and totals. Preserve table formatting as much as possible." },
-            { type: "image_url", image_url: { url: `data:${billFile.type};base64,${base64}` } },
-          ];
+          if (pdf.numPages > MAX_PAGES) {
+            await worker.terminate();
+            throw new Error(`PDF too long. Maximum ${MAX_PAGES} pages allowed.`);
+          }
 
-          // OCR via OpenAI gpt-4o vision
-          const ocrRes = await fetch("https://api.openai.com/v1/chat/completions", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
-            },
-            body: JSON.stringify({
-              model: "gpt-4o",
-              messages: [{ role: "user", content }],
-              max_tokens: 1024,
-            }),
-          });
+          for (let i = 1; i <= numPages; i++) {
+            const page = await pdf.getPage(i);
+            const viewport = page.getViewport({ scale: 2.0 });
 
-          const ocrData = await ocrRes.json();
-          if (!ocrRes.ok) throw new Error(`OCR error: ${JSON.stringify(ocrData)}`);
+            const canvas = new OffscreenCanvas(viewport.width, viewport.height);
+            await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
 
-          const pageText = ocrData.choices?.[0]?.message?.content?.trim() || "[No text extracted]";
+            const blob = await canvas.convertToBlob({ type: "image/png" });
+            const imageBuffer = await blob.arrayBuffer();
 
-          pages.push({ page: pageIndex, rawText: pageText });
-          pageIndex++;
+            const result = await worker.recognize(imageBuffer);
+            const pageText = result.data.text.trim();
+
+            pages.push({ page: pageIndex, rawText: pageText || "[No text extracted]" });
+            pageIndex++;
+          }
+        } else {
+          // Single image file
+          const result = await worker.recognize(arrayBuffer);
+          const pageText = result.data.text.trim();
+
+          pages.push({ page: 1, rawText: pageText || "[No text extracted]" });
         }
+
+        await worker.terminate();
 
         // -------------------
         // Generate per-page explanation using OpenAI

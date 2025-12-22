@@ -1,6 +1,7 @@
 // worker/src/index.js
 // ExplainMyBill Worker – Full Feature + Multi-Page + Table-Aware + Live Preview + JSON Output
-// OCR via optimized Tesseract.js + Excel support via SheetJS + GPT explanation via OpenAI
+// OCR via Google Cloud Vision API (superior accuracy for bills) + GPT explanation via OpenAI
+// Excel support via SheetJS
 
 export default {
   async fetch(request, env, ctx) {
@@ -63,7 +64,7 @@ export default {
     }
 
     // -------------------
-    // 2️⃣ Explain Bill – Modular Processing (PDF, Image, Excel)
+    // 2️⃣ Explain Bill – Google Vision OCR + GPT Explanation + Excel Support
     // -------------------
     if (request.method === "POST") {
       try {
@@ -90,34 +91,40 @@ export default {
 
         let pages = [];
 
-        // Load Tesseract.js once (optimized)
-        const { createWorker } = Tesseract;
-        const tesseractWorker = await createWorker({
-          workerPath: 'https://unpkg.com/tesseract.js@5.1.0/dist/worker.min.js',
-          langPath: 'https://tesseract.projectnaptha.com/lang-data/5.0.0_best',
-          corePath: 'https://unpkg.com/tesseract.js-core@5.1.0/tesseract-core.wasm.js',
-        });
-        await tesseractWorker.load();
-        await tesseractWorker.loadLanguage('eng');
-        await tesseractWorker.initialize('eng');
-        // Optimized settings for bills
-        await tesseractWorker.setParameters({
-          tessedit_pageseg_mode: '6', // Assume uniform block of text
-          preserve_interword_spaces: '1',
-        });
+        if (fileName.endsWith('.xlsx') || fileName.endsWith('.xls')) {
+          // Excel support (unchanged)
+          pages = await processExcel(arrayBuffer);
+        } else {
+          // Image or PDF — use Google Vision OCR
+          const bytes = new Uint8Array(arrayBuffer);
+          const base64 = btoa(String.fromCharCode(...bytes));
 
-        try {
-          if (fileType === "application/pdf" || fileName.endsWith('.pdf')) {
-            pages = await processPDF(arrayBuffer, tesseractWorker);
-          } else if (fileName.endsWith('.xlsx') || fileName.endsWith('.xls')) {
-            pages = await processExcel(arrayBuffer);
-          } else {
-            // Single image
-            const result = await tesseractWorker.recognize(arrayBuffer);
-            pages = [{ page: 1, rawText: result.data.text.trim() || "[No text extracted]" }];
+          const visionRes = await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              requests: [{
+                image: { content: base64 },
+                features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+              }],
+            }),
+          });
+
+          const visionData = await visionRes.json();
+          if (!visionRes.ok) {
+            throw new Error(`Google Vision error: ${JSON.stringify(visionData)}`);
           }
-        } finally {
-          await tesseractWorker.terminate();
+
+          const fullText = visionData.responses[0]?.fullTextAnnotation?.text || "[No text extracted]";
+
+          // Split by form feed for multi-page (Vision separates pages with \f)
+          const pageTexts = fullText.split(/\f/).map(t => t.trim()).filter(t => t);
+          if (pageTexts.length === 0) pageTexts.push(fullText.trim());
+
+          pages = pageTexts.map((text, i) => ({
+            page: i + 1,
+            rawText: text || "[No text extracted]",
+          }));
         }
 
         // -------------------
@@ -181,35 +188,7 @@ ${!isPaid ? "\n\nIMPORTANT: Provide ONLY a short teaser summary (under 150 words
   },
 };
 
-// Modular: Process PDF
-async function processPDF(arrayBuffer, tesseractWorker) {
-  const pdfjsLib = await import("https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs");
-  pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs";
-
-  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise;
-  const numPages = Math.min(pdf.numPages, 20); // Limit to 20 pages
-
-  let pages = [];
-  for (let i = 1; i <= numPages; i++) {
-    const page = await pdf.getPage(i);
-    const viewport = page.getViewport({ scale: 2.0 });
-
-    const canvas = new OffscreenCanvas(viewport.width, viewport.height);
-    await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
-
-    const blob = await canvas.convertToBlob({ type: "image/png" });
-    const imageBuffer = await blob.arrayBuffer();
-
-    const result = await tesseractWorker.recognize(imageBuffer);
-    const pageText = result.data.text.trim();
-
-    pages.push({ page: i, rawText: pageText || "[No text extracted]" });
-  }
-
-  return pages;
-}
-
-// Modular: Process Excel
+// Modular: Process Excel (preserved)
 async function processExcel(arrayBuffer) {
   const XLSX = await import("https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm");
   const workbook = XLSX.read(new Uint8Array(arrayBuffer), { type: "array" });

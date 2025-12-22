@@ -1,7 +1,6 @@
 // worker/src/index.js
-// ExplainMyBill Worker – Ultimate Premium Features
-// Google Vision OCR (preferred) + OpenAI Vision fallback
-// ALL FEATURES PRESERVED — no removals
+// ExplainMyBill Worker – Full Premium Features for Paid Users
+// All previous features preserved + robust key loading
 
 export default {
   async fetch(request, env, ctx) {
@@ -91,7 +90,6 @@ export default {
 
         let pages = [];
 
-        // Excel support
         if (fileName.endsWith('.xlsx') || fileName.endsWith('.xls')) {
           pages = await processExcel(arrayBuffer);
         } else {
@@ -100,10 +98,13 @@ export default {
 
           let extractedText = "";
 
-          // Try Google Vision first
-          if (env.GOOGLE_VISION_API_KEY) {
+          // -------------------
+          // Try Google Vision first (with exact secret name)
+          // -------------------
+          const googleKey = env["GOOGLE_VISION_API KEY"] || env.GOOGLE_VISION_API_KEY;
+          if (googleKey) {
             try {
-              const visionRes = await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`, {
+              const visionRes = await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${googleKey}`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -119,18 +120,21 @@ export default {
                 extractedText = visionData.responses[0].fullTextAnnotation.text;
               }
             } catch (e) {
-              console.warn("Google Vision failed, falling back to OpenAI vision:", e);
+              console.warn("Google Vision failed:", e);
             }
           }
 
+          // -------------------
           // Fallback to OpenAI Vision
-          if (!extractedText && env.OPENAI_API_KEY) {
+          // -------------------
+          const openaiKey = env.OPENAI_API_KEY;
+          if (!extractedText && openaiKey) {
             try {
               const ocrRes = await fetch("https://api.openai.com/v1/chat/completions", {
                 method: "POST",
                 headers: {
                   "Content-Type": "application/json",
-                  "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
+                  "Authorization": `Bearer ${openaiKey}`,
                 },
                 body: JSON.stringify({
                   model: "gpt-4o",
@@ -158,13 +162,15 @@ export default {
           }
 
           // Split into pages
-          const pageTexts = extractedText.split(/\f/).map(t => t.trim()).filter(t => t);
+          const pageTexts = extractedText.split(/\f/).map(t => t.trim()).filter(t => t.length > 0);
           pages = pageTexts.length > 0
             ? pageTexts.map((text, i) => ({ page: i + 1, rawText: text }))
             : [{ page: 1, rawText: extractedText }];
         }
 
+        // -------------------
         // Generate explanations
+        // -------------------
         for (let p of pages) {
           let prompt = `You are an expert medical billing assistant.
 Explain the following page/section of a medical/dental bill. Include tables, CPT/ICD codes, charges, insurance adjustments, patient responsibility, totals, and simple explanations.
@@ -182,11 +188,14 @@ Suggest next steps if something looks wrong.`;
             prompt += "\n\nIMPORTANT: Provide ONLY a short teaser summary (under 150 words) and end with: 'Upgrade to get the full detailed explanation.'";
           }
 
+          const openaiKey = env.OPENAI_API_KEY;
+          if (!openaiKey) throw new Error("OpenAI API key not configured");
+
           const aiRes = await fetch("https://api.openai.com/v1/chat/completions", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
+              "Authorization": `Bearer ${openaiKey}`,
             },
             body: JSON.stringify({
               model: "gpt-4o-mini",

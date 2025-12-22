@@ -1,3 +1,4 @@
+// worker/src/index.js
 // ExplainMyBill Worker – Full Feature + Multi-Page + Table-Aware + Live Preview + JSON Output
 // No npm dependencies needed!
 
@@ -28,9 +29,7 @@ export default {
           });
         }
 
-        const priceId = plan === "monthly"
-          ? "price_YourMonthlyPriceID"
-          : "price_YourOneTimePriceID";
+        const priceId = plan === "monthly" ? "price_123monthly" : "price_123one";
 
         const stripeRes = await fetch("https://api.stripe.com/v1/checkout/sessions", {
           method: "POST",
@@ -43,8 +42,8 @@ export default {
             "line_items[0][price]": priceId,
             "line_items[0][quantity]": "1",
             "mode": plan === "monthly" ? "subscription" : "payment",
-            "success_url": "https://explain-my-bill.pages.dev/success?session_id={CHECKOUT_SESSION_ID}",
-            "cancel_url": "https://explain-my-bill.pages.dev/cancel",
+            "success_url": "https://explain-my-bill-frontend.onrender.com/success?session_id={CHECKOUT_SESSION_ID}",
+            "cancel_url": "https://explain-my-bill-frontend.onrender.com/cancel",
           }),
         });
 
@@ -91,15 +90,14 @@ export default {
         // -------------------
         for (let offset = 0; offset < arrayBuffer.byteLength; offset += MAX_BYTES_PER_PAGE) {
           const slice = arrayBuffer.slice(offset, offset + MAX_BYTES_PER_PAGE);
-          let pageText = "";
 
-          try {
-            const decoder = new TextDecoder("utf-8", { fatal: false });
-            pageText = decoder.decode(slice);
-          } catch {
-            pageText = btoa(String.fromCharCode(...new Uint8Array(slice)));
-            pageText = `[BASE64_ENCODED_BILL_PAGE_${pageIndex}_START]${pageText}[BASE64_ENCODED_BILL_PAGE_${pageIndex}_END]`;
-          }
+          const ocrRes = await env.AI.run("@cf/meta/llama-3.2-11b-vision-instruct", {
+            image: [...new Uint8Array(slice)],
+            prompt: "Extract all visible text from this bill page exactly as shown. Include dates, procedure codes (CPT), diagnosis codes (ICD-10), descriptions, charges, insurance adjustments, patient responsibility, and totals. Preserve table formatting as much as possible.",
+            max_tokens: 1024,
+          });
+
+          const pageText = ocrRes.response?.trim() || "[No text extracted]";
 
           pages.push({ page: pageIndex, rawText: pageText });
           pageIndex++;
@@ -136,7 +134,7 @@ ${!isPaid ? "\n\nIMPORTANT: Provide ONLY a short teaser summary (under 150 words
 
           const explanation = aiData.choices?.[0]?.message?.content?.trim() || "No explanation generated.";
           p.explanation = explanation;
-          p.snippet = explanation.substring(0, 200); // preview snippet
+          p.snippet = explanation.substring(0, 200) + (explanation.length > 200 ? "..." : "");
         }
 
         // -------------------

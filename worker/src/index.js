@@ -1,6 +1,7 @@
 // worker/src/index.js
 // ExplainMyBill Worker – Full Feature + Multi-Page + Table-Aware + Live Preview + JSON Output
-// No npm dependencies needed!
+// Uses OpenAI gpt-4o for both OCR (vision) and explanation
+// No Cloudflare AI — all AI via OpenAI_API_KEY
 
 export default {
   async fetch(request, env, ctx) {
@@ -63,7 +64,7 @@ export default {
     }
 
     // -------------------
-    // 2️⃣ Explain Bill – Multi-Page + Table-Aware + JSON Output
+    // 2️⃣ Explain Bill – Multi-Page + Vision OCR + GPT Explanation (All via OpenAI)
     // -------------------
     if (request.method === "POST") {
       try {
@@ -80,31 +81,51 @@ export default {
 
         const isPaid = Boolean(sessionId);
         const arrayBuffer = await billFile.arrayBuffer();
-        const MAX_BYTES_PER_PAGE = 1024 * 1024; // 1MB per page
+        const MAX_BYTES_PER_PAGE = 1024 * 1024 * 4; // 4MB per page (OpenAI vision supports larger)
 
         let pages = [];
         let pageIndex = 1;
 
         // -------------------
-        // Multi-page processing
+        // Multi-page processing (chunk by size)
         // -------------------
         for (let offset = 0; offset < arrayBuffer.byteLength; offset += MAX_BYTES_PER_PAGE) {
           const slice = arrayBuffer.slice(offset, offset + MAX_BYTES_PER_PAGE);
+          const bytes = new Uint8Array(slice);
 
-          const ocrRes = await env.AI.run("@cf/meta/llama-3.2-11b-vision-instruct", {
-            image: [...new Uint8Array(slice)],
-            prompt: "Extract all visible text from this bill page exactly as shown. Include dates, procedure codes (CPT), diagnosis codes (ICD-10), descriptions, charges, insurance adjustments, patient responsibility, and totals. Preserve table formatting as much as possible.",
-            max_tokens: 1024,
+          // Convert to base64 for OpenAI vision
+          const base64 = btoa(String.fromCharCode(...bytes));
+
+          const content = [
+            { type: "text", text: "Extract all visible text from this bill page exactly as shown. Include dates, procedure codes (CPT), diagnosis codes (ICD-10), descriptions, charges, insurance adjustments, patient responsibility, and totals. Preserve table formatting as much as possible." },
+            { type: "image_url", image_url: { url: `data:${billFile.type};base64,${base64}` } },
+          ];
+
+          // OCR via OpenAI gpt-4o vision
+          const ocrRes = await fetch("https://api.openai.com/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
+            },
+            body: JSON.stringify({
+              model: "gpt-4o",
+              messages: [{ role: "user", content }],
+              max_tokens: 1024,
+            }),
           });
 
-          const pageText = ocrRes.response?.trim() || "[No text extracted]";
+          const ocrData = await ocrRes.json();
+          if (!ocrRes.ok) throw new Error(`OCR error: ${JSON.stringify(ocrData)}`);
+
+          const pageText = ocrData.choices?.[0]?.message?.content?.trim() || "[No text extracted]";
 
           pages.push({ page: pageIndex, rawText: pageText });
           pageIndex++;
         }
 
         // -------------------
-        // Generate per-page GPT explanation
+        // Generate per-page explanation using OpenAI
         // -------------------
         for (let p of pages) {
           const prompt = `You are an expert medical billing assistant.
@@ -129,8 +150,8 @@ ${!isPaid ? "\n\nIMPORTANT: Provide ONLY a short teaser summary (under 150 words
             }),
           });
 
-          const aiData = await aiRes.json().catch(() => ({}));
-          if (!aiRes.ok) throw new Error(`OpenAI explanation error: ${aiRes.status} – ${JSON.stringify(aiData)}`);
+          const aiData = await aiRes.json();
+          if (!aiRes.ok) throw new Error(`Explanation error: ${JSON.stringify(aiData)}`);
 
           const explanation = aiData.choices?.[0]?.message?.content?.trim() || "No explanation generated.";
           p.explanation = explanation;

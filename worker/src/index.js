@@ -58,14 +58,13 @@ export default {
     }
 
     // -------------------
-    // 2️⃣ Bill Processing (FIXED)
+    // 2️⃣ Bill Processing
     // -------------------
     if (request.method === "POST") {
       try {
         const formData = await request.formData();
         const billFile = formData.get("bill");
-        const sessionId =
-          formData.get("sessionId") || url.searchParams.get("session_id");
+        const sessionId = formData.get("sessionId") || url.searchParams.get("session_id");
 
         if (!billFile || billFile.size === 0) {
           throw new Error("No bill uploaded");
@@ -76,50 +75,41 @@ export default {
         const bytes = new Uint8Array(buffer);
         const base64 = btoa(String.fromCharCode(...bytes));
         const fileName = billFile.name.toLowerCase();
-        const mimeType = billFile.type;
 
         let pages = [];
 
-        // -------------------
-        // Excel handling (UNCHANGED)
-        // -------------------
-        if (fileName.endsWith(".xls") || fileName.endsWith(".xlsx")) {
+        if (fileName.endsWith('.xlsx') || fileName.endsWith('.xls')) {
           pages = await processExcel(buffer);
         } else {
-          // -------------------
-          // OCR (Google Vision)
-          // -------------------
-          const visionKey = env.GOOGLE_VISION_API_KEY;
-          if (!visionKey) throw new Error("GOOGLE_VISION_API_KEY missing");
+          const key = env.GOOGLE_VISION_API_KEY;
+          if (!key) throw new Error("Google Vision key missing");
 
-          const visionRes = await fetch(
-            `https://vision.googleapis.com/v1/images:annotate?key=${visionKey}`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                requests: [{
-                  image: { content: base64 },
-                  features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
-                }],
-              }),
-            }
-          );
+          const res = await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${key}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              requests: [{
+                image: { content: base64 },
+                features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+              }],
+            }),
+          });
 
-          const visionData = await visionRes.json();
-          const fullText =
-            visionData.responses?.[0]?.fullTextAnnotation?.text ||
-            "[No text extracted]";
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error?.message || "OCR failed");
 
-          pages = [{
-            page: 1,
-            rawText: fullText,
-          }];
+          const fullText = data.responses[0]?.fullTextAnnotation?.text || "[No text extracted]";
+
+          const pageTexts = fullText.split(/\f/).map(t => t.trim()).filter(t => t.length > 0);
+          if (pageTexts.length === 0) pageTexts.push(fullText.trim());
+
+          pages = pageTexts.map((text, i) => ({
+            page: i + 1,
+            rawText: text || "[No text extracted]",
+          }));
         }
 
-        // -------------------
-        // AI EXPLANATIONS (UNCHANGED CORE)
-        // -------------------
+        // Generate explanations
         for (const p of pages) {
           let prompt = `You are an expert medical billing assistant.
 
@@ -188,7 +178,6 @@ ${p.rawText}
           isPaid,
           pages,
           fullExplanation,
-          explanation: fullExplanation, // Aligned for frontend
           freeFeatures,
           paidFeatures,
         }), {
@@ -209,7 +198,7 @@ ${p.rawText}
 
 // ===============================
 // HELPERS (ALL NEW ONES ADDITIVE)
-// ===============================
+ // ===============================
 function generateSummaryCard(text) {
   return "This bill appears to be a routine medical visit with insurance adjustments applied.";
 }
@@ -242,7 +231,7 @@ function extractGlossary(text) {
 }
 
 function calculateAnomalyScore(text) {
-  return Math.floor(Math.random * 40) + 60;
+  return Math.floor(Math.random() * 40) + 60;
 }
 
 function generateNegotiationScript() {

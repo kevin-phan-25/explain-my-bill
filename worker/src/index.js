@@ -1,20 +1,26 @@
-// ExplainMyBill Worker – Advanced Dual AI Merge with Confidence Scoring (Dec 2025)
+// ExplainMyBill Worker – Final Dual AI + Confidence + Robust CORS (Dec 2025)
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
+    // Dynamic CORS headers – always allow Content-Type + X-Dev-Bypass
     const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type, X-Dev-Bypass",
     };
 
+    // Preflight: Echo back requested headers for maximum compatibility
     if (request.method === "OPTIONS") {
+      const requestedHeaders = request.headers.get("Access-Control-Request-Headers");
+      if (requestedHeaders) {
+        corsHeaders["Access-Control-Allow-Headers"] = requestedHeaders;
+      }
       return new Response(null, { headers: corsHeaders });
     }
 
-    // Stripe Checkout (unchanged)
+    // Stripe Checkout
     if (url.pathname === "/create-checkout-session" && request.method === "POST") {
       try {
         const { plan } = await request.json();
@@ -83,7 +89,7 @@ export default {
 
         let pages = [];
 
-        // OCR Logic (unchanged)
+        // OCR Logic
         if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {
           pages = await processExcel(buffer);
         } else if (fileName.endsWith(".pdf")) {
@@ -198,7 +204,6 @@ ${!isPaid ? "Keep explanation under 120 words and end with: 'Upgrade for full ex
           let openAiParsed = parseAiResponse(openAiData);
           let geminiParsed = parseGeminiResponse(geminiData);
 
-          // Advanced merge with confidence scoring
           const finalStructured = mergeWithConfidence(openAiParsed, geminiParsed, isPaid);
 
           page.structured = finalStructured;
@@ -232,11 +237,11 @@ ${!isPaid ? "Keep explanation under 120 words and end with: 'Upgrade for full ex
       }
     }
 
-    return new Response("ExplainMyBill Worker – Dual AI + Confidence Merge Ready", { headers: corsHeaders });
+    return new Response("ExplainMyBill Worker – Running", { headers: corsHeaders });
   },
 };
 
-// Parse OpenAI
+// Helpers (unchanged)
 function parseAiResponse(data) {
   try {
     let content = data.choices?.[0]?.message?.content?.trim() || "{}";
@@ -247,7 +252,6 @@ function parseAiResponse(data) {
   }
 }
 
-// Parse Gemini
 function parseGeminiResponse(data) {
   try {
     const content = data.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
@@ -258,7 +262,6 @@ function parseGeminiResponse(data) {
   }
 }
 
-// Advanced merge with confidence-based selection
 function mergeWithConfidence(openAi, gemini, isPaid) {
   const fallback = {
     summary: "Analysis completed with dual AI cross-verification.",
@@ -277,7 +280,6 @@ function mergeWithConfidence(openAi, gemini, isPaid) {
   const aConf = a.confidences || {};
   const bConf = b.confidences || {};
 
-  // Helper to pick highest confidence non-null value
   const pickHighestConfidence = (field) => {
     const valA = a.keyAmounts?.[field];
     const valB = b.keyAmounts?.[field];
@@ -292,7 +294,6 @@ function mergeWithConfidence(openAi, gemini, isPaid) {
     return null;
   };
 
-  // Choose explanation: longer one (more detailed), or fallback
   const explanationA = a.explanation || "";
   const explanationB = b.explanation || "";
   const finalExplanation = explanationA.length >= explanationB.length ? explanationA : explanationB;
@@ -305,7 +306,6 @@ function mergeWithConfidence(openAi, gemini, isPaid) {
       insurancePaid: pickHighestConfidence("insurancePaid"),
       patientResponsibility: pickHighestConfidence("patientResponsibility"),
     },
-    // Optional: expose merged confidence (average of non-zero)
     confidences: {
       totalCharges: Math.max(aConf.totalCharges || 0, bConf.totalCharges || 0),
       insuranceAdjusted: Math.max(aConf.insuranceAdjusted || 0, bConf.insuranceAdjusted || 0),
@@ -319,7 +319,6 @@ function mergeWithConfidence(openAi, gemini, isPaid) {
   };
 }
 
-// Excel helper
 async function processExcel(buffer) {
   const XLSX = await import("https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm");
   const wb = XLSX.read(new Uint8Array(buffer), { type: "array" });

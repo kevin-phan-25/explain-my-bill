@@ -1,7 +1,6 @@
-// worker/src/index.js
-// ExplainMyBill Worker – Final Clean Version
+// worker/src/index.js - Final Version
 // Google Vision OCR + OpenAI Explanation + Stripe
-// Low-maintenance, high-value
+// Fixed base64 encoding to prevent stack overflow
 
 export default {
   async fetch(request, env, ctx) {
@@ -64,9 +63,16 @@ export default {
         const isPaid = Boolean(sessionId);
         const buffer = await billFile.arrayBuffer();
         const bytes = new Uint8Array(buffer);
-        const base64 = btoa(String.fromCharCode(...bytes));
         const fileName = billFile.name.toLowerCase();
         let pages = [];
+
+        // Safe base64 encoding in chunks to avoid stack overflow
+        let base64 = '';
+        const chunkSize = 8192; // 8KB chunks – safe and efficient
+        for (let i = 0; i < bytes.length; i += chunkSize) {
+          const chunk = bytes.subarray(i, i + chunkSize);
+          base64 += btoa(String.fromCharCode(...chunk));
+        }
 
         if (fileName.endsWith('.xlsx') || fileName.endsWith('.xls')) {
           pages = await processExcel(buffer);

@@ -34,8 +34,10 @@ export default {
             "line_items[0][price]": priceId,
             "line_items[0][quantity]": "1",
             mode: plan === "monthly" ? "subscription" : "payment",
-            success_url: "https://explain-my-bill-frontend.onrender.com/success?session_id={CHECKOUT_SESSION_ID}",
-            cancel_url: "https://explain-my-bill-frontend.onrender.com/cancel",
+            success_url:
+              "https://explain-my-bill-frontend.onrender.com/success?session_id={CHECKOUT_SESSION_ID}",
+            cancel_url:
+              "https://explain-my-bill-frontend.onrender.com/cancel",
           }),
         });
 
@@ -54,7 +56,7 @@ export default {
     }
 
     // -------------------
-    // 2️⃣ Bill Processing (FIXED)
+    // 2️⃣ Bill Processing (FULL FIX)
     // -------------------
     if (request.method === "POST") {
       try {
@@ -71,11 +73,10 @@ export default {
         const buffer = await billFile.arrayBuffer();
         const bytes = new Uint8Array(buffer);
         const fileName = billFile.name.toLowerCase();
-        const mimeType = billFile.type;
 
         let pages = [];
 
-        // ✅ SAFE base64 encoding (NO corruption)
+        // ✅ SAFE base64 encoding (kept)
         const base64 = btoa(
           Array.from(bytes, (b) => String.fromCharCode(b)).join("")
         );
@@ -88,24 +89,21 @@ export default {
         }
 
         // -------------------
-        // PDF handling (FIXED)
+        // PDF handling (FIXED – no async Vision jobs)
         // -------------------
         else if (fileName.endsWith(".pdf")) {
           const key = env.GOOGLE_VISION_API_KEY;
           if (!key) throw new Error("Google Vision key missing");
 
           const res = await fetch(
-            `https://vision.googleapis.com/v1/files:annotate?key=${key}`,
+            `https://vision.googleapis.com/v1/images:annotate?key=${key}`,
             {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 requests: [
                   {
-                    inputConfig: {
-                      content: base64,
-                      mimeType: "application/pdf",
-                    },
+                    image: { content: base64 },
                     features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
                   },
                 ],
@@ -114,18 +112,18 @@ export default {
           );
 
           const data = await res.json();
-          const responses = data.responses?.[0]?.responses || [];
+          const text =
+            data.responses?.[0]?.fullTextAnnotation?.text || "";
 
-          pages = responses
-            .map((r, i) => ({
-              page: i + 1,
-              rawText: r.fullTextAnnotation?.text || "",
-            }))
-            .filter((p) => p.rawText.trim().length > 0);
+          if (!text.trim()) {
+            throw new Error("OCR produced no readable text");
+          }
+
+          pages = [{ page: 1, rawText: text }];
         }
 
         // -------------------
-        // Image handling (FIXED)
+        // Image handling (UNCHANGED)
         // -------------------
         else {
           const key = env.GOOGLE_VISION_API_KEY;
@@ -170,10 +168,11 @@ export default {
 
 ${p.rawText}
 
-${isPaid
-            ? "Include red flags, codes, charges, and next steps."
-            : "Give a short teaser under 150 words. End with 'Upgrade for full details.'"
-          }`;
+${
+  isPaid
+    ? "Include red flags, codes, charges, and next steps."
+    : "Give a short teaser under 150 words. End with 'Upgrade for full details.'"
+}`;
 
           const res = await fetch("https://api.openai.com/v1/chat/completions", {
             method: "POST",
@@ -198,11 +197,13 @@ ${isPaid
           .map((p) => `Page ${p.page}:\n${p.explanation}`)
           .join("\n\n");
 
+        // ✅ ADD explanation field (frontend fix)
         return new Response(
           JSON.stringify({
             isPaid,
             pages,
             fullExplanation,
+            explanation: fullExplanation,
           }),
           {
             headers: { "Content-Type": "application/json", ...corsHeaders },

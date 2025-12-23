@@ -1,6 +1,6 @@
 // worker/src/index.js - Final Version
 // Google Vision OCR + OpenAI Explanation + Stripe
-// Fixed base64 encoding + Correct Google Vision URL
+// Fixed Google Vision URL + Safe binary base64 encoding
 
 export default {
   async fetch(request, env, ctx) {
@@ -66,13 +66,12 @@ export default {
         const fileName = billFile.name.toLowerCase();
         let pages = [];
 
-        // Safe base64 encoding in chunks to avoid stack overflow
-        let base64 = '';
-        const chunkSize = 8192; // 8KB chunks – safe and efficient
-        for (let i = 0; i < bytes.length; i += chunkSize) {
-          const chunk = bytes.subarray(i, i + chunkSize);
-          base64 += btoa(String.fromCharCode(...chunk));
+        // FIXED: Safe binary-to-base64 encoding (no stack overflow, no corruption)
+        let binary = '';
+        for (let i = 0; i < bytes.length; i++) {
+          binary += String.fromCharCode(bytes[i]);
         }
+        const base64 = btoa(binary);
 
         if (fileName.endsWith('.xlsx') || fileName.endsWith('.xls')) {
           pages = await processExcel(buffer);
@@ -80,7 +79,7 @@ export default {
           const key = env.GOOGLE_VISION_API_KEY;
           if (!key) throw new Error("Google Vision key missing");
 
-          // FIXED: Correct Google Vision API endpoint
+          // FIXED: Correct Google Vision endpoint with /v1/
           const res = await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${key}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },

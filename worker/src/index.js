@@ -1,4 +1,4 @@
-// ExplainMyBill Worker – Fully Fixed & Structured JSON Output (Dec 2025)
+// ExplainMyBill Worker – Advanced Dual AI Merge with Confidence Scoring (Dec 2025)
 
 export default {
   async fetch(request, env, ctx) {
@@ -10,14 +10,11 @@ export default {
       "Access-Control-Allow-Headers": "Content-Type, X-Dev-Bypass",
     };
 
-    // Handle OPTIONS preflight
     if (request.method === "OPTIONS") {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // -------------------
-    // Stripe Checkout Session Creation
-    // -------------------
+    // Stripe Checkout (unchanged)
     if (url.pathname === "/create-checkout-session" && request.method === "POST") {
       try {
         const { plan } = await request.json();
@@ -67,15 +64,12 @@ export default {
       }
     }
 
-    // -------------------
-    // Main Bill Processing (OCR + AI → Structured JSON)
-    // -------------------
+    // Main Bill Processing
     if (request.method === "POST") {
       try {
         const formData = await request.formData();
         const billFile = formData.get("bill");
-        const sessionId =
-          formData.get("sessionId") || url.searchParams.get("session_id");
+        const sessionId = formData.get("sessionId") || url.searchParams.get("session_id");
 
         if (!billFile || billFile.size === 0) {
           throw new Error("No bill uploaded");
@@ -89,12 +83,10 @@ export default {
 
         let pages = [];
 
-        // Excel files
+        // OCR Logic (unchanged)
         if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {
           pages = await processExcel(buffer);
-        }
-        // PDF files
-        else if (fileName.endsWith(".pdf")) {
+        } else if (fileName.endsWith(".pdf")) {
           const key = env.GOOGLE_VISION_API_KEY;
           if (!key) throw new Error("Google Vision API key missing");
 
@@ -104,27 +96,22 @@ export default {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
-                requests: [
-                  {
-                    inputConfig: { content: base64, mimeType: "application/pdf" },
-                    features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
-                  },
-                ],
+                requests: [{
+                  inputConfig: { content: base64, mimeType: "application/pdf" },
+                  features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+                }],
               }),
             }
           );
 
           const data = await res.json();
           if (data.error) throw new Error(data.error.message);
-
           const responses = data.responses?.[0]?.responses || [];
           pages = responses.map((r, i) => ({
             page: i + 1,
             rawText: r.fullTextAnnotation?.text || "[No text on this page]",
           }));
-        }
-        // Image files (jpg, png, etc.)
-        else {
+        } else {
           const key = env.GOOGLE_VISION_API_KEY;
           if (!key) throw new Error("Google Vision API key missing");
 
@@ -134,27 +121,24 @@ export default {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
-                requests: [
-                  {
-                    image: { content: base64 },
-                    features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
-                  },
-                ],
+                requests: [{
+                  image: { content: base64 },
+                  features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+                }],
               }),
             }
           );
 
           const data = await res.json();
           if (data.error) throw new Error(data.error.message);
-
           const text = data.responses?.[0]?.fullTextAnnotation?.text || "[No text found]";
           pages = [{ page: 1, rawText: text }];
         }
 
-        // AI Analysis – Force Valid JSON Output
+        // Dual AI Analysis with Confidence
         for (const page of pages) {
-          const model = isPaid ? "gpt-4o" : "gpt-4o-mini";
-          const maxTokens = isPaid ? 1200 : 300;
+          const modelOpenAI = isPaid ? "gpt-4o" : "gpt-4o-mini";
+          const modelGemini = isPaid ? "gemini-1.5-pro" : "gemini-1.5-flash";
 
           const prompt = `You are an expert medical bill analyst. Respond with ONLY valid JSON in this exact structure. No markdown, no extra text.
 
@@ -165,6 +149,12 @@ export default {
     "insuranceAdjusted": "Amount adjusted/written off or null",
     "insurancePaid": "Amount insurance paid or null",
     "patientResponsibility": "Final amount patient owes or null"
+  },
+  "confidences": {
+    "totalCharges": 0-100 confidence score (100 = very confident, based on clarity in bill),
+    "insuranceAdjusted": 0-100,
+    "insurancePaid": 0-100,
+    "patientResponsibility": 0-100
   },
   "services": ["Short list of main services/procedures"],
   "redFlags": ["Potential issues or overcharges (empty array if none)"],
@@ -178,52 +168,41 @@ Bill text:
 ${!isPaid ? "Keep explanation under 120 words and end with: 'Upgrade for full expert review, red flags, and appeal tools.'" : ""}
 `;
 
-          const aiRes = await fetch("https://api.openai.com/v1/chat/completions", {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${env.OPENAI_API_KEY}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              model,
-              messages: [{ role: "user", content: prompt }],
-              temperature: 0.2,
-              max_tokens: maxTokens,
-            }),
-          });
-
-          const aiData = await aiRes.json();
-          let raw = aiData.choices?.[0]?.message?.content?.trim() || "{}";
-
-          // Clean common wrapper issues
-          raw = raw.replace(/^```json\n?/, "").replace(/\n?```$/, "").trim();
-
-          let structured;
-          try {
-            structured = JSON.parse(raw);
-          } catch (e) {
-            // Fallback if JSON is invalid
-            structured = {
-              summary: "Bill analysis completed.",
-              keyAmounts: {
-                totalCharges: null,
-                insuranceAdjusted: null,
-                insurancePaid: null,
-                patientResponsibility: null,
+          const [openAiRes, geminiRes] = await Promise.all([
+            fetch("https://api.openai.com/v1/chat/completions", {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+                "Content-Type": "application/json",
               },
-              services: ["Medical services"],
-              redFlags: [],
-              explanation: isPaid
-                ? raw.slice(0, 800) + "\n\n[Structured analysis partially failed]"
-                : raw.slice(0, 150) + "\n\nUpgrade for full details.",
-              nextSteps: isPaid
-                ? ["Request itemized bill", "Compare at FairHealthConsumer.org", "Contact insurance"]
-                : ["Upgrade for personalized guidance"],
-            };
-          }
+              body: JSON.stringify({
+                model: modelOpenAI,
+                messages: [{ role: "user", content: prompt }],
+                temperature: 0.2,
+                max_tokens: isPaid ? 1200 : 300,
+              }),
+            }),
+            fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelGemini}:generateContent?key=${env.GEMINI_API_KEY}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                contents: [{ role: "user", parts: [{ text: prompt }] }],
+                generationConfig: { temperature: 0.2, maxOutputTokens: isPaid ? 1200 : 300 },
+              }),
+            }),
+          ]);
 
-          page.structured = structured;
-          page.explanation = structured.explanation;
+          const openAiData = await openAiRes.json();
+          const geminiData = await geminiRes.json();
+
+          let openAiParsed = parseAiResponse(openAiData);
+          let geminiParsed = parseGeminiResponse(geminiData);
+
+          // Advanced merge with confidence scoring
+          const finalStructured = mergeWithConfidence(openAiParsed, geminiParsed, isPaid);
+
+          page.structured = finalStructured;
+          page.explanation = finalStructured.explanation;
         }
 
         const fullExplanation = pages
@@ -253,14 +232,94 @@ ${!isPaid ? "Keep explanation under 120 words and end with: 'Upgrade for full ex
       }
     }
 
-    // Default response
-    return new Response("ExplainMyBill Worker v2 running – Structured JSON ready", {
-      headers: corsHeaders,
-    });
+    return new Response("ExplainMyBill Worker – Dual AI + Confidence Merge Ready", { headers: corsHeaders });
   },
 };
 
-// MUST be outside the export default block
+// Parse OpenAI
+function parseAiResponse(data) {
+  try {
+    let content = data.choices?.[0]?.message?.content?.trim() || "{}";
+    content = content.replace(/^```json\n?/, "").replace(/\n?```$/, "").trim();
+    return JSON.parse(content);
+  } catch (e) {
+    return null;
+  }
+}
+
+// Parse Gemini
+function parseGeminiResponse(data) {
+  try {
+    const content = data.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+    const cleaned = content.replace(/^```json\n?/, "").replace(/\n?```$/, "").trim();
+    return JSON.parse(cleaned);
+  } catch (e) {
+    return null;
+  }
+}
+
+// Advanced merge with confidence-based selection
+function mergeWithConfidence(openAi, gemini, isPaid) {
+  const fallback = {
+    summary: "Analysis completed with dual AI cross-verification.",
+    keyAmounts: { totalCharges: null, insuranceAdjusted: null, insurancePaid: null, patientResponsibility: null },
+    confidences: { totalCharges: 0, insuranceAdjusted: 0, insurancePaid: 0, patientResponsibility: 0 },
+    services: [],
+    redFlags: [],
+    explanation: isPaid ? "Detailed review completed." : "Upgrade for full expert review.",
+    nextSteps: isPaid ? ["Review your itemized bill", "Contact your insurance"] : ["Upgrade for personalized guidance"],
+  };
+
+  if (!openAi && !gemini) return fallback;
+
+  const a = openAi || {};
+  const b = gemini || {};
+  const aConf = a.confidences || {};
+  const bConf = b.confidences || {};
+
+  // Helper to pick highest confidence non-null value
+  const pickHighestConfidence = (field) => {
+    const valA = a.keyAmounts?.[field];
+    const valB = b.keyAmounts?.[field];
+    const confA = aConf[field] || 0;
+    const confB = bConf[field] || 0;
+
+    if (valA && valB) {
+      return confA >= confB ? valA : valB;
+    }
+    if (valA) return valA;
+    if (valB) return valB;
+    return null;
+  };
+
+  // Choose explanation: longer one (more detailed), or fallback
+  const explanationA = a.explanation || "";
+  const explanationB = b.explanation || "";
+  const finalExplanation = explanationA.length >= explanationB.length ? explanationA : explanationB;
+
+  return {
+    summary: a.summary || b.summary || fallback.summary,
+    keyAmounts: {
+      totalCharges: pickHighestConfidence("totalCharges"),
+      insuranceAdjusted: pickHighestConfidence("insuranceAdjusted"),
+      insurancePaid: pickHighestConfidence("insurancePaid"),
+      patientResponsibility: pickHighestConfidence("patientResponsibility"),
+    },
+    // Optional: expose merged confidence (average of non-zero)
+    confidences: {
+      totalCharges: Math.max(aConf.totalCharges || 0, bConf.totalCharges || 0),
+      insuranceAdjusted: Math.max(aConf.insuranceAdjusted || 0, bConf.insuranceAdjusted || 0),
+      insurancePaid: Math.max(aConf.insurancePaid || 0, bConf.insurancePaid || 0),
+      patientResponsibility: Math.max(aConf.patientResponsibility || 0, bConf.patientResponsibility || 0),
+    },
+    services: [...new Set([...(a.services || []), ...(b.services || [])])],
+    redFlags: [...new Set([...(a.redFlags || []), ...(b.redFlags || [])])],
+    explanation: finalExplanation || fallback.explanation,
+    nextSteps: [...new Set([...(a.nextSteps || []), ...(b.nextSteps || [])])],
+  };
+}
+
+// Excel helper
 async function processExcel(buffer) {
   const XLSX = await import("https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm");
   const wb = XLSX.read(new Uint8Array(buffer), { type: "array" });

@@ -1,10 +1,7 @@
-// worker/src/index.js - Final Working Version
-// Google Vision OCR + OpenAI Explanation + Stripe
-// Fixed URL + Safe base64 encoding
-
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+
     const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -16,13 +13,16 @@ export default {
     }
 
     // -------------------
-    // 1️⃣ Stripe Checkout
+    // 1️⃣ Stripe Checkout (UNCHANGED)
     // -------------------
     if (url.pathname === "/create-checkout-session" && request.method === "POST") {
       try {
         const { plan } = await request.json();
         if (!["monthly", "one-time"].includes(plan)) throw new Error("Invalid plan");
-        const priceId = plan === "monthly" ? "price_123monthly" : "price_123one";
+
+        const priceId =
+          plan === "monthly" ? "price_123monthly" : "price_123one";
+
         const res = await fetch("https://api.stripe.com/v1/checkout/sessions", {
           method: "POST",
           headers: {
@@ -38,8 +38,10 @@ export default {
             cancel_url: "https://explain-my-bill-frontend.onrender.com/cancel",
           }),
         });
+
         const data = await res.json();
         if (!res.ok) throw new Error(data.error?.message || "Payment failed");
+
         return new Response(JSON.stringify({ id: data.id }), {
           headers: { "Content-Type": "application/json", ...corsHeaders },
         });
@@ -52,60 +54,127 @@ export default {
     }
 
     // -------------------
-    // 2️⃣ Bill Processing
+    // 2️⃣ Bill Processing (FIXED)
     // -------------------
     if (request.method === "POST") {
       try {
         const formData = await request.formData();
         const billFile = formData.get("bill");
-        const sessionId = formData.get("sessionId") || url.searchParams.get("session_id");
-        if (!billFile || billFile.size === 0) throw new Error("No bill uploaded");
+        const sessionId =
+          formData.get("sessionId") || url.searchParams.get("session_id");
+
+        if (!billFile || billFile.size === 0) {
+          throw new Error("No bill uploaded");
+        }
+
         const isPaid = Boolean(sessionId);
         const buffer = await billFile.arrayBuffer();
         const bytes = new Uint8Array(buffer);
         const fileName = billFile.name.toLowerCase();
+        const mimeType = billFile.type;
+
         let pages = [];
 
-        // FIXED: Safe base64 encoding for binary files (no corruption)
-        let binary = '';
-        for (let i = 0; i < bytes.length; i++) {
-          binary += String.fromCharCode(bytes[i]);
-        }
-        const base64 = btoa(binary);
+        // ✅ SAFE base64 encoding (NO corruption)
+        const base64 = btoa(
+          Array.from(bytes, (b) => String.fromCharCode(b)).join("")
+        );
 
-        if (fileName.endsWith('.xlsx') || fileName.endsWith('.xls')) {
+        // -------------------
+        // Excel handling (UNCHANGED)
+        // -------------------
+        if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {
           pages = await processExcel(buffer);
-        } else {
+        }
+
+        // -------------------
+        // PDF handling (FIXED)
+        // -------------------
+        else if (fileName.endsWith(".pdf")) {
           const key = env.GOOGLE_VISION_API_KEY;
           if (!key) throw new Error("Google Vision key missing");
 
-          // FIXED: Correct endpoint with /v1/
-          const res = await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${key}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              requests: [{
-                image: { content: base64 },
-                features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
-              }],
-            }),
-          });
+          const res = await fetch(
+            `https://vision.googleapis.com/v1/files:annotate?key=${key}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                requests: [
+                  {
+                    inputConfig: {
+                      content: base64,
+                      mimeType: "application/pdf",
+                    },
+                    features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+                  },
+                ],
+              }),
+            }
+          );
 
           const data = await res.json();
-          if (!res.ok) throw new Error(data.error?.message || "OCR failed");
-          const text = data.responses[0]?.fullTextAnnotation?.text || "[No text]";
-          const pageTexts = text.split(/\f/).map(t => t.trim()).filter(t => t);
-          pages = pageTexts.length > 0
-            ? pageTexts.map((t, i) => ({ page: i + 1, rawText: t }))
-            : [{ page: 1, rawText: text }];
+          const responses = data.responses?.[0]?.responses || [];
+
+          pages = responses
+            .map((r, i) => ({
+              page: i + 1,
+              rawText: r.fullTextAnnotation?.text || "",
+            }))
+            .filter((p) => p.rawText.trim().length > 0);
         }
 
-        // Generate explanations
+        // -------------------
+        // Image handling (FIXED)
+        // -------------------
+        else {
+          const key = env.GOOGLE_VISION_API_KEY;
+          if (!key) throw new Error("Google Vision key missing");
+
+          const res = await fetch(
+            `https://vision.googleapis.com/v1/images:annotate?key=${key}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                requests: [
+                  {
+                    image: { content: base64 },
+                    features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+                  },
+                ],
+              }),
+            }
+          );
+
+          const data = await res.json();
+          const text =
+            data.responses?.[0]?.fullTextAnnotation?.text || "";
+
+          if (!text.trim()) {
+            throw new Error("OCR produced no readable text");
+          }
+
+          pages = [{ page: 1, rawText: text }];
+        }
+
+        if (pages.length === 0) {
+          throw new Error("We could not read your bill clearly");
+        }
+
+        // -------------------
+        // AI Explanation (UNCHANGED)
+        // -------------------
         for (const p of pages) {
           const prompt = `Explain this medical bill in simple English.
-Content:
+
 ${p.rawText}
-${isPaid ? "Include red flags, codes, charges, and next steps." : "Give a short teaser under 150 words. End with 'Upgrade for full details.'"}`;
+
+${isPaid
+            ? "Include red flags, codes, charges, and next steps."
+            : "Give a short teaser under 150 words. End with 'Upgrade for full details.'"
+          }`;
+
           const res = await fetch("https://api.openai.com/v1/chat/completions", {
             method: "POST",
             headers: {
@@ -118,31 +187,27 @@ ${isPaid ? "Include red flags, codes, charges, and next steps." : "Give a short 
               max_tokens: isPaid ? 1000 : 300,
             }),
           });
+
           const data = await res.json();
-          p.explanation = data.choices?.[0]?.message?.content?.trim() || "No explanation";
+          p.explanation =
+            data.choices?.[0]?.message?.content?.trim() ||
+            "No explanation generated.";
         }
 
-        const fullExplanation = pages.map(p => `Page ${p.page}:\n${p.explanation}`).join("\n\n");
+        const fullExplanation = pages
+          .map((p) => `Page ${p.page}:\n${p.explanation}`)
+          .join("\n\n");
 
-        let paidFeatures = {};
-        if (isPaid) {
-          paidFeatures = {
-            redFlags: fullExplanation.includes("DENIED") ? ["Possible denial"] : [],
-            appealLetter: "Dear Insurance,\n\nI am appealing the claim...\n\nThank you.",
-            costComparison: { note: "Check fairhealthconsumer.org" },
-            insuranceLookup: { note: "Call your insurer" },
-            customAdvice: "Get an itemized bill and verify charges.",
-          };
-        }
-
-        return new Response(JSON.stringify({
-          isPaid,
-          pages,
-          fullExplanation,
-          paidFeatures,
-        }), {
-          headers: { "Content-Type": "application/json", ...corsHeaders },
-        });
+        return new Response(
+          JSON.stringify({
+            isPaid,
+            pages,
+            fullExplanation,
+          }),
+          {
+            headers: { "Content-Type": "application/json", ...corsHeaders },
+          }
+        );
       } catch (err) {
         return new Response(JSON.stringify({ error: err.message }), {
           status: 500,

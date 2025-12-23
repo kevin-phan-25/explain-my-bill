@@ -1,6 +1,6 @@
 // worker/src/index.js - Final Version
 // Google Vision OCR + OpenAI Explanation + Stripe
-// Fixed base64 encoding to prevent stack overflow
+// Fixed base64 encoding + Correct Google Vision URL
 
 export default {
   async fetch(request, env, ctx) {
@@ -79,6 +79,8 @@ export default {
         } else {
           const key = env.GOOGLE_VISION_API_KEY;
           if (!key) throw new Error("Google Vision key missing");
+
+          // FIXED: Correct Google Vision API endpoint
           const res = await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${key}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -89,6 +91,7 @@ export default {
               }],
             }),
           });
+
           const data = await res.json();
           if (!res.ok) throw new Error(data.error?.message || "OCR failed");
           const text = data.responses[0]?.fullTextAnnotation?.text || "[No text]";

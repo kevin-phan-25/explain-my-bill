@@ -1,5 +1,5 @@
-// ExplainMyBill Worker – Full Code with Fixed Base64 Encoding (Dec 2025)
-// FIX: Replaced dangerous String.fromCharCode(...bytes) with chunked btoa to prevent "Maximum call stack size exceeded"
+// ExplainMyBill Worker – Full Code with Node.js Buffer Base64 Fix (Dec 2025)
+// FIX: Use Node.js Buffer for safe, efficient Base64 encoding – no stack overflow, lower memory usage
 
 export default {
   async fetch(request, env, ctx) {
@@ -97,8 +97,10 @@ export default {
         const buffer = await billFile.arrayBuffer();
         const bytes = new Uint8Array(buffer);
 
-        // FIXED: Safe chunked Base64 encoding
-        const base64 = chunkedBtoa(bytes);
+        // FIXED: Use Node.js Buffer for safe Base64 encoding (Cloudflare Workers compatible)
+        // Import at top level or here – works in Workers runtime
+        const { Buffer } = await import("node:buffer");
+        const base64 = Buffer.from(bytes).toString("base64");
 
         const fileName = billFile.name.toLowerCase();
 
@@ -382,15 +384,4 @@ async function processExcel(buffer) {
     page: i + 1,
     rawText: XLSX.utils.sheet_to_csv(wb.Sheets[name]) || "[Empty sheet]",
   }));
-}
-
-// NEW: Safe chunked Base64 encoding – fixes "Maximum call stack size exceeded"
-function chunkedBtoa(bytes) {
-  const CHUNK_SIZE = 8192; // Safe chunk size (adjust if needed)
-  let binary = '';
-  for (let i = 0; i < bytes.byteLength; i += CHUNK_SIZE) {
-    const chunk = bytes.subarray(i, i + CHUNK_SIZE);
-    binary += String.fromCharCode(...chunk);
-  }
-  return btoa(binary);
 }

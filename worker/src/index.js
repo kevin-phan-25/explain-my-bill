@@ -1,4 +1,4 @@
-// ExplainMyBill Worker – Fixed Vision API Endpoints (Dec 2025)
+// ExplainMyBill Worker – Corrected Vision API Endpoints & Handling (Dec 2025)
 
 export default {
   async fetch(request, env, ctx) {
@@ -97,43 +97,14 @@ export default {
         let pages = [];
 
         // =====================
-        // OCR – Fixed Endpoints
+        // OCR – Unified to images:annotate for all (supports PDF base64)
         // =====================
         if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {
           pages = await processExcel(buffer);
-        } else if (fileName.endsWith(".pdf")) {
-          // Fixed: Use files:annotate for PDFs (supports multi-page, up to 5 pages sync)
-          const res = await fetch(
-            `https://vision.googleapis.com/v1/files:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                requests: [
-                  {
-                    inputConfig: {
-                      content: base64,
-                      mimeType: "application/pdf",
-                    },
-                    features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
-                    // Optional: specify pages, e.g. pages: [1,2,3,4,5] or omit for first 5
-                  },
-                ],
-              }),
-            }
-          );
-
-          const data = await res.json();
-          if (data.error) throw new Error(data.error.message);
-
-          // Response structure: data.responses[0].responses[] one per extracted page
-          const pageResponses = data.responses?.[0]?.responses || [];
-          pages = pageResponses.map((r, i) => ({
-            page: i + 1,
-            rawText: r.fullTextAnnotation?.text || "[No text detected on this page]",
-          }));
         } else {
-          // Fixed: Use images:annotate for single images
+          // Use images:annotate for both images and PDFs (Vision treats base64 PDF as multi-image batch)
+          const mimeType = fileName.endsWith(".pdf") ? "application/pdf" : "image/jpeg"; // Adjust if needed (jpeg/png etc.)
+
           const res = await fetch(
             `https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
             {
@@ -144,6 +115,10 @@ export default {
                   {
                     image: { content: base64 },
                     features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+                    imageContext: { 
+                      // Optional: for better OCR on documents
+                      languageHints: ["en"],
+                    },
                   },
                 ],
               }),
@@ -151,16 +126,23 @@ export default {
           );
 
           const data = await res.json();
-          if (data.error) throw new Error(data.error.message);
 
-          pages = [
-            {
-              page: 1,
-              rawText:
-                data.responses?.[0]?.fullTextAnnotation?.text ||
-                "[No text found]",
-            },
-          ];
+          if (data.error) {
+            throw new Error(data.error.message || "Vision API error");
+          }
+
+          // For single image: responses[0]
+          // For PDF: responses[] one per page (up to ~5-10 depending on size)
+          const responses = data.responses || [];
+
+          if (responses.length === 0) {
+            pages = [{ page: 1, rawText: "[No text detected]" }];
+          } else {
+            pages = responses.map((r, i) => ({
+              page: i + 1,
+              rawText: r.fullTextAnnotation?.text || "[No text detected on this page]",
+            }));
+          }
         }
 
         // =====================
@@ -268,6 +250,7 @@ Bill text:
           }
         );
       } catch (err) {
+        console.error("Worker error:", err);
         return new Response(JSON.stringify({ error: err.message || "Processing failed" }), {
           status: 500,
           headers: { "Content-Type": "application/json", ...corsHeaders },

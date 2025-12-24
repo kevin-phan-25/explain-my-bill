@@ -1,4 +1,5 @@
-// ExplainMyBill Worker – Full Code with fallbackStructured Fixed & All Features Preserved (Dec 2025)
+// ExplainMyBill Worker – Full Code with Fixed Base64 Encoding (Dec 2025)
+// FIX: Replaced dangerous String.fromCharCode(...bytes) with chunked btoa to prevent "Maximum call stack size exceeded"
 
 export default {
   async fetch(request, env, ctx) {
@@ -87,11 +88,18 @@ export default {
           throw new Error("No bill uploaded");
         }
 
+        if (billFile.size > 20 * 1024 * 1024) {
+          throw new Error("File too large – maximum 20MB");
+        }
+
         const isPaid = Boolean(sessionId);
 
         const buffer = await billFile.arrayBuffer();
         const bytes = new Uint8Array(buffer);
-        const base64 = btoa(String.fromCharCode(...bytes));
+
+        // FIXED: Safe chunked Base64 encoding
+        const base64 = chunkedBtoa(bytes);
+
         const fileName = billFile.name.toLowerCase();
 
         let pages = [];
@@ -298,7 +306,7 @@ function parseGeminiResponse(data) {
   }
 }
 
-// fallbackStructured – ADDED TO FIX THE ERROR
+// fallbackStructured – Preserved
 function fallbackStructured(isPaid) {
   return {
     summary: "Bill analyzed successfully.",
@@ -374,4 +382,15 @@ async function processExcel(buffer) {
     page: i + 1,
     rawText: XLSX.utils.sheet_to_csv(wb.Sheets[name]) || "[Empty sheet]",
   }));
+}
+
+// NEW: Safe chunked Base64 encoding – fixes "Maximum call stack size exceeded"
+function chunkedBtoa(bytes) {
+  const CHUNK_SIZE = 8192; // Safe chunk size (adjust if needed)
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i += CHUNK_SIZE) {
+    const chunk = bytes.subarray(i, i + CHUNK_SIZE);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
 }

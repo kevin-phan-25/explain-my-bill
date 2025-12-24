@@ -1,4 +1,4 @@
-// ExplainMyBill Worker – Corrected Vision API Endpoints & Handling (Dec 2025)
+// ExplainMyBill Worker – Fixed Vision API with Correct files:annotate Endpoint (Dec 2025)
 
 export default {
   async fetch(request, env, ctx) {
@@ -97,14 +97,50 @@ export default {
         let pages = [];
 
         // =====================
-        // OCR – Unified to images:annotate for all (supports PDF base64)
+        // OCR – Correct files:annotate for PDFs & GIF/TIFF, images:annotate for others
         // =====================
         if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {
           pages = await processExcel(buffer);
-        } else {
-          // Use images:annotate for both images and PDFs (Vision treats base64 PDF as multi-image batch)
-          const mimeType = fileName.endsWith(".pdf") ? "application/pdf" : "image/jpeg"; // Adjust if needed (jpeg/png etc.)
+        } else if (fileName.endsWith(".pdf") || fileName.endsWith(".tiff") || fileName.endsWith(".tif") || fileName.endsWith(".gif")) {
+          // Use files:annotate for multi-page formats (PDF up to 5 pages sync)
+          const res = await fetch(
+            `https://vision.googleapis.com/v1/files:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                requests: [
+                  {
+                    inputConfig: {
+                      content: base64,
+                      mimeType: fileName.endsWith(".pdf") ? "application/pdf" : fileName.endsWith(".gif") ? "image/gif" : "image/tiff",
+                    },
+                    features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+                    // pages: [1,2,3,4,5] // optional: limit to specific pages
+                  },
+                ],
+              }),
+            }
+          );
 
+          const data = await res.json();
+
+          if (data.error) {
+            throw new Error(data.error.message || "Vision files:annotate error");
+          }
+
+          // Response: data.responses[0].responses[] (one per page)
+          const pageResponses = data.responses?.[0]?.responses || [];
+          pages = pageResponses.map((r, i) => ({
+            page: i + 1,
+            rawText: r.fullTextAnnotation?.text || "[No text detected on this page]",
+          }));
+
+          if (pages.length === 0) {
+            pages = [{ page: 1, rawText: "[No pages processed]" }];
+          }
+        } else {
+          // Single images
           const res = await fetch(
             `https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
             {
@@ -115,10 +151,6 @@ export default {
                   {
                     image: { content: base64 },
                     features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
-                    imageContext: { 
-                      // Optional: for better OCR on documents
-                      languageHints: ["en"],
-                    },
                   },
                 ],
               }),
@@ -128,21 +160,17 @@ export default {
           const data = await res.json();
 
           if (data.error) {
-            throw new Error(data.error.message || "Vision API error");
+            throw new Error(data.error.message || "Vision images:annotate error");
           }
 
-          // For single image: responses[0]
-          // For PDF: responses[] one per page (up to ~5-10 depending on size)
-          const responses = data.responses || [];
-
-          if (responses.length === 0) {
-            pages = [{ page: 1, rawText: "[No text detected]" }];
-          } else {
-            pages = responses.map((r, i) => ({
-              page: i + 1,
-              rawText: r.fullTextAnnotation?.text || "[No text detected on this page]",
-            }));
-          }
+          pages = [
+            {
+              page: 1,
+              rawText:
+                data.responses?.[0]?.fullTextAnnotation?.text ||
+                "[No text found]",
+            },
+          ];
         }
 
         // =====================

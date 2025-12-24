@@ -1,4 +1,4 @@
-// ExplainMyBill Worker – Final Dual AI + Confidence + Robust CORS (Dec 2025)
+// ExplainMyBill Worker – Final Dual AI + Smart Confidence Merge (Dec 2025)
 
 export default {
   async fetch(request, env, ctx) {
@@ -119,6 +119,7 @@ export default {
           );
 
           const data = await res.json();
+          if (data.error) throw new Error(data.error.message);
           const responses = data.responses?.[0]?.responses || [];
           pages = responses.map((r, i) => ({
             page: i + 1,
@@ -142,6 +143,7 @@ export default {
           );
 
           const data = await res.json();
+          if (data.error) throw new Error(data.error.message);
           pages = [
             {
               page: 1,
@@ -156,43 +158,45 @@ export default {
         // AI ANALYSIS
         // =====================
         for (const page of pages) {
-          const prompt = `
-You are an expert medical bill analyst.
-Respond with ONLY valid JSON in this exact structure:
+          const modelOpenAI = isPaid ? "gpt-4o" : "gpt-4o-mini";
+          const modelGemini = isPaid ? "gemini-1.5-pro" : "gemini-1.5-flash";
+
+          const prompt = `You are an expert medical bill analyst. Analyze the bill text and respond with ONLY valid JSON in this exact structure. No markdown, no extra text, no explanations.
 
 {
-  "summary": "One clear sentence summarizing the bill",
+  "summary": "One clear sentence summarizing the entire bill",
   "summaryPoints": [
-    "High-impact insight 1",
-    "High-impact insight 2"
+    "Most important insight #1",
+    "Most important insight #2",
+    "Most important insight #3 (optional)"
   ],
   "keyAmounts": {
-    "totalCharges": "$ amount or null",
-    "insuranceAdjusted": "$ amount or null",
-    "insurancePaid": "$ amount or null",
-    "patientResponsibility": "$ amount or null"
+    "totalCharges": "Extracted total billed amount as string with $ (e.g. '$10,191.60') or null",
+    "insuranceAdjusted": "Amount written off/adjusted or null",
+    "insurancePaid": "Amount insurance paid or null",
+    "patientResponsibility": "Final amount patient owes or null"
   },
   "confidences": {
-    "totalCharges": 0-100,
+    "totalCharges": 0-100 confidence score,
     "insuranceAdjusted": 0-100,
     "insurancePaid": 0-100,
     "patientResponsibility": 0-100
   },
-  "services": ["Main services"],
-  "redFlags": ["Issues or empty array"],
-  "explanation": "2–4 paragraph plain-English explanation",
-  "nextSteps": ["Actionable steps"]
+  "services": ["Short list of main services/procedures as strings"],
+  "redFlags": ["Potential issues, overcharges, or errors as strings (empty array if none)"],
+  "explanation": "Clear, calm, plain-English explanation in 2-4 short paragraphs",
+  "nextSteps": ["Ranked actionable steps, most important first (e.g. 'Request itemized bill', 'Compare on FairHealthConsumer.org')"]
 }
 
 Rules:
-- summaryPoints must be 2–3 bullets max
-- No fluff
-- No markdown
-- No extra text
+- summaryPoints: 2-3 high-impact bullets only
+- nextSteps: ranked by priority, most urgent first
+- Be accurate and conservative — only include what is clearly in the text
+- Use calm, non-alarming language
+- If free user: keep explanation under 120 words and end with: 'Upgrade for full expert review, red flags, and personalized appeal tools.'
 
 Bill text:
 """${page.rawText}"""
-${!isPaid ? "Keep explanation under 120 words and end with an upgrade prompt." : ""}
 `;
 
           const [openAiRes, geminiRes] = await Promise.all([
@@ -203,79 +207,154 @@ ${!isPaid ? "Keep explanation under 120 words and end with an upgrade prompt." :
                 "Content-Type": "application/json",
               },
               body: JSON.stringify({
-                model: isPaid ? "gpt-4o" : "gpt-4o-mini",
+                model: modelOpenAI,
                 messages: [{ role: "user", content: prompt }],
                 temperature: 0.2,
+                max_tokens: isPaid ? 1200 : 300,
               }),
             }),
             fetch(
-              `https://generativelanguage.googleapis.com/v1beta/models/${isPaid ? "gemini-1.5-pro" : "gemini-1.5-flash"}:generateContent?key=${env.GEMINI_API_KEY}`,
+              `https://generativelanguage.googleapis.com/v1beta/models/${modelGemini}:generateContent?key=${env.GEMINI_API_KEY}`,
               {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                   contents: [{ role: "user", parts: [{ text: prompt }] }],
+                  generationConfig: {
+                    temperature: 0.2,
+                    maxOutputTokens: isPaid ? 1200 : 300,
+                  },
                 }),
               }
             ),
           ]);
 
-          const openAiParsed = parseAiResponse(await openAiRes.json());
-          const geminiParsed = parseGeminiResponse(await geminiRes.json());
+          const openAiData = await openAiRes.json();
+          const geminiData = await geminiRes.json();
 
+          const openAiParsed = parseAiResponse(openAiData);
+          const geminiParsed = parseGeminiResponse(geminiData);
+
+          // Smart merge using confidence
           page.structured = mergeWithConfidence(openAiParsed, geminiParsed, isPaid);
-          page.explanation = page.structured.explanation;
+          page.explanation = page.structured.explanation || "Analysis complete.";
         }
+
+        const fullExplanation = pages
+          .map((p) => p.explanation)
+          .join("\n\n");
 
         return new Response(
           JSON.stringify({
             isPaid,
-            pages,
-            explanation: pages.map(p => p.explanation).join("\n\n"),
+            pages: pages.map((p) => ({
+              page: p.page,
+              structured: p.structured,
+              explanation: p.explanation,
+            })),
+            explanation: fullExplanation,
           }),
-          { headers: { "Content-Type": "application/json", ...corsHeaders } }
+          {
+            headers: { "Content-Type": "application/json", ...corsHeaders },
+          }
         );
       } catch (err) {
-        return new Response(JSON.stringify({ error: err.message }), {
+        return new Response(JSON.stringify({ error: err.message || "Processing failed" }), {
           status: 500,
           headers: { "Content-Type": "application/json", ...corsHeaders },
         });
       }
     }
 
-    return new Response("ExplainMyBill Worker – Running", {
-      headers: corsHeaders,
-    });
+    return new Response("ExplainMyBill Worker – Running", { headers: corsHeaders });
   },
 };
 
 // =====================
-// HELPERS (EXTENDED, NOT REMOVED)
+// HELPERS
 // =====================
-function mergeWithConfidence(a, b, isPaid) {
-  const base = a || b || {};
-  return {
-    ...base,
-    summaryPoints: base.summaryPoints || [],
-  };
-}
-
 function parseAiResponse(data) {
   try {
-    return JSON.parse(data.choices?.[0]?.message?.content || "{}");
-  } catch {
+    let content = data.choices?.[0]?.message?.content?.trim() || "{}";
+    content = content.replace(/^```json\n?/, "").replace(/\n?```$/, "").trim();
+    return JSON.parse(content);
+  } catch (e) {
     return null;
   }
 }
 
 function parseGeminiResponse(data) {
   try {
-    return JSON.parse(
-      data.candidates?.[0]?.content?.parts?.[0]?.text || "{}"
-    );
-  } catch {
+    const content = data.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+    const cleaned = content.replace(/^```json\n?/, "").replace(/\n?```$/, "").trim();
+    return JSON.parse(cleaned);
+  } catch (e) {
     return null;
   }
+}
+
+// Smart merge: confidence-based selection + list combination
+function mergeWithConfidence(openAi, gemini, isPaid) {
+  const fallback = {
+    summary: "Bill analyzed successfully.",
+    summaryPoints: ["Analysis complete", "See details below"],
+    keyAmounts: { totalCharges: null, insuranceAdjusted: null, insurancePaid: null, patientResponsibility: null },
+    confidences: { totalCharges: 0, insuranceAdjusted: 0, insurancePaid: 0, patientResponsibility: 0 },
+    services: [],
+    redFlags: [],
+    explanation: isPaid 
+      ? "Detailed analysis completed using dual AI verification." 
+      : "Basic analysis complete. Upgrade for full expert review, red flags, and appeal tools.",
+    nextSteps: [
+      "Request a detailed itemized bill from your provider",
+      "Compare charges on FairHealthConsumer.org",
+      "Call your insurance using the claim number"
+    ],
+  };
+
+  if (!openAi && !gemini) return fallback;
+
+  const a = openAi || {};
+  const b = gemini || {};
+  const aConf = a.confidences || {};
+  const bConf = b.confidences || {};
+
+  const pickHighest = (field) => {
+    const valA = a.keyAmounts?.[field];
+    const valB = b.keyAmounts?.[field];
+    const confA = aConf[field] || 0;
+    const confB = bConf[field] || 0;
+
+    if (valA && valB) return confA >= confB ? valA : valB;
+    if (valA) return valA;
+    if (valB) return valB;
+    return null;
+  };
+
+  const longerExplanation = (a.explanation || "").length >= (b.explanation || "").length 
+    ? a.explanation 
+    : b.explanation;
+
+  return {
+    summary: a.summary || b.summary || fallback.summary,
+    summaryPoints: [...new Set([...(a.summaryPoints || []), ...(b.summaryPoints || [])])].slice(0, 3),
+    keyAmounts: {
+      totalCharges: pickHighest("totalCharges"),
+      insuranceAdjusted: pickHighest("insuranceAdjusted"),
+      insurancePaid: pickHighest("insurancePaid"),
+      patientResponsibility: pickHighest("patientResponsibility"),
+    },
+    confidences: {
+      totalCharges: Math.max(aConf.totalCharges || 0, bConf.totalCharges || 0),
+      insuranceAdjusted: Math.max(aConf.insuranceAdjusted || 0, bConf.insuranceAdjusted || 0),
+      insurancePaid: Math.max(aConf.insurancePaid || 0, bConf.insurancePaid || 0),
+      patientResponsibility: Math.max(aConf.patientResponsibility || 0, bConf.patientResponsibility || 0),
+    },
+    services: [...new Set([...(a.services || []), ...(b.services || [])])],
+    redFlags: [...new Set([...(a.redFlags || []), ...(b.redFlags || [])])],
+    explanation: longerExplanation || fallback.explanation,
+    nextSteps: [...new Set([...(a.nextSteps || []), ...(b.nextSteps || [])])],
+  };
 }
 
 async function processExcel(buffer) {

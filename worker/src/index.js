@@ -1,4 +1,4 @@
-// ExplainMyBill Worker – Final Dual AI + Smart Confidence Merge (Dec 2025)
+// ExplainMyBill Worker – Fixed Vision API Endpoints (Dec 2025)
 
 export default {
   async fetch(request, env, ctx) {
@@ -97,11 +97,12 @@ export default {
         let pages = [];
 
         // =====================
-        // OCR
+        // OCR – Fixed Endpoints
         // =====================
         if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {
           pages = await processExcel(buffer);
         } else if (fileName.endsWith(".pdf")) {
+          // Fixed: Use files:annotate for PDFs (supports multi-page, up to 5 pages sync)
           const res = await fetch(
             `https://vision.googleapis.com/v1/files:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
             {
@@ -110,8 +111,12 @@ export default {
               body: JSON.stringify({
                 requests: [
                   {
-                    inputConfig: { content: base64, mimeType: "application/pdf" },
+                    inputConfig: {
+                      content: base64,
+                      mimeType: "application/pdf",
+                    },
                     features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+                    // Optional: specify pages, e.g. pages: [1,2,3,4,5] or omit for first 5
                   },
                 ],
               }),
@@ -120,12 +125,15 @@ export default {
 
           const data = await res.json();
           if (data.error) throw new Error(data.error.message);
-          const responses = data.responses?.[0]?.responses || [];
-          pages = responses.map((r, i) => ({
+
+          // Response structure: data.responses[0].responses[] one per extracted page
+          const pageResponses = data.responses?.[0]?.responses || [];
+          pages = pageResponses.map((r, i) => ({
             page: i + 1,
-            rawText: r.fullTextAnnotation?.text || "[No text]",
+            rawText: r.fullTextAnnotation?.text || "[No text detected on this page]",
           }));
         } else {
+          // Fixed: Use images:annotate for single images
           const res = await fetch(
             `https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
             {
@@ -144,6 +152,7 @@ export default {
 
           const data = await res.json();
           if (data.error) throw new Error(data.error.message);
+
           pages = [
             {
               page: 1,

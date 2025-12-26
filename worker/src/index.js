@@ -1,4 +1,4 @@
-// ExplainMyBill Worker – Production Ready with "Amount Due" Fix & All Features (Dec 2025)
+// ExplainMyBill Worker – Production Ready + OCR Reliability Fix (Dec 2025)
 
 export default {
   async fetch(request, env, ctx) {
@@ -81,8 +81,8 @@ export default {
           throw new Error("No bill uploaded");
         }
 
-        if (billFile.size > 20 * 1024 * 1024) {
-          throw new Error("File too large – maximum 20MB");
+        if (billFile.size > 15 * 1024 * 1024) { // Reduced limit for safety
+          throw new Error("File too large – please upload under 15MB");
         }
 
         const isPaid = Boolean(sessionId);
@@ -94,64 +94,101 @@ export default {
 
         let pages = [];
 
-        if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {
-          pages = await processExcel(buffer);
-        } else if (fileName.endsWith(".pdf")) {
-          const res = await fetch(
-            `https://vision.googleapis.com/v1/files:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                requests: [
-                  {
-                    inputConfig: { content: base64, mimeType: "application/pdf" },
-                    features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
-                  },
-                ],
-              }),
+        try {
+          if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {
+            pages = await processExcel(buffer);
+          } else if (fileName.endsWith(".pdf")) {
+            const res = await fetch(
+              `https://vision.googleapis.com/v1/files:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  requests: [
+                    {
+                      inputConfig: { content: base64, mimeType: "application/pdf" },
+                      features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+                      pages: [-1], // all pages
+                    },
+                  ],
+                }),
+              }
+            );
+
+            const data = await res.json();
+            console.log("PDF Vision response:", JSON.stringify(data));
+
+            if (data.error) {
+              throw new Error(`Vision API error: ${data.error.message}`);
             }
-          );
 
-          const data = await res.json();
-          if (data.error) throw new Error(data.error.message);
-
-          const pageResponses = data.responses?.[0]?.responses || [];
-          pages = pageResponses.map((r, i) => ({
-            page: i + 1,
-            rawText: r.fullTextAnnotation?.text || "[No text detected]",
-          }));
-        } else {
-          const res = await fetch(
-            `https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                requests: [
-                  {
-                    image: { content: base64 },
-                    features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
-                  },
-                ],
-              }),
+            const pageResponses = data.responses?.[0]?.responses || [];
+            if (pageResponses.length === 0) {
+              throw new Error("No pages detected in PDF");
             }
-          );
 
-          const data = await res.json();
-          if (data.error) throw new Error(data.error.message);
+            pages = pageResponses.map((r, i) => ({
+              page: i + 1,
+              rawText: r.fullTextAnnotation?.text?.trim() || "[No text detected on this page]",
+            }));
+          } else {
+            // Images (PNG, JPG, etc.)
+            const res = await fetch(
+              `https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  requests: [
+                    {
+                      image: { content: base64 },
+                      features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+                    },
+                  ],
+                }),
+              }
+            );
 
-          pages = [
-            {
+            const data = await res.json();
+            console.log("Image Vision response:", JSON.stringify(data));
+
+            if (data.error) {
+              throw new Error(`Vision API error: ${data.error.message}`);
+            }
+
+            const text = data.responses?.[0]?.fullTextAnnotation?.text?.trim();
+            pages = [
+              {
+                page: 1,
+                rawText: text || "[No text detected in image]",
+              },
+            ];
+          }
+
+          // Final safety check
+          if (pages.every(p => !p.rawText || p.rawText.includes("No text"))) {
+            pages = [{
               page: 1,
-              rawText:
-                data.responses?.[0]?.fullTextAnnotation?.text ||
-                "[No text found]",
-            },
-          ];
+              rawText: "[OCR FAILED: No readable text found. Try a clearer, higher-resolution image or PDF. Avoid screenshots with low contrast.]"
+            }];
+          }
+
+        } catch (ocrError) {
+          console.error("OCR failed:", ocrError.message);
+          pages = [{
+            page: 1,
+            rawText: `[OCR ERROR: ${ocrError.message}. Please try a different file or clearer image.]`
+          }];
         }
 
+        // AI ANALYSIS – Only if we have text
         for (const page of pages) {
+          if (page.rawText.includes("OCR FAILED") || page.rawText.includes("OCR ERROR")) {
+            page.structured = fallbackStructured(isPaid);
+            page.explanation = page.rawText;
+            continue;
+          }
+
           const modelOpenAI = isPaid ? "gpt-4o" : "gpt-4o-mini";
           const modelGemini = isPaid ? "gemini-1.5-pro" : "gemini-1.5-flash";
 
@@ -191,44 +228,50 @@ Bill text:
 """${page.rawText}"""
 `;
 
-          const [openAiRes, geminiRes] = await Promise.all([
-            fetch("https://api.openai.com/v1/chat/completions", {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${env.OPENAI_API_KEY}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                model: modelOpenAI,
-                messages: [{ role: "user", content: prompt }],
-                temperature: 0.2,
-                max_tokens: isPaid ? 1200 : 300,
-              }),
-            }),
-            fetch(
-              `https://generativelanguage.googleapis.com/v1beta/models/${modelGemini}:generateContent?key=${env.GEMINI_API_KEY}`,
-              {
+          try {
+            const [openAiRes, geminiRes] = await Promise.all([
+              fetch("https://api.openai.com/v1/chat/completions", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: {
+                  Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+                  "Content-Type": "application/json",
+                },
                 body: JSON.stringify({
-                  contents: [{ role: "user", parts: [{ text: prompt }] }],
-                  generationConfig: {
-                    temperature: 0.2,
-                    maxOutputTokens: isPaid ? 1200 : 300,
-                  },
+                  model: modelOpenAI,
+                  messages: [{ role: "user", content: prompt }],
+                  temperature: 0.2,
+                  max_tokens: isPaid ? 1200 : 300,
                 }),
-              }
-            ),
-          ]);
+              }),
+              fetch(
+                `https://generativelanguage.googleapis.com/v1beta/models/${modelGemini}:generateContent?key=${env.GEMINI_API_KEY}`,
+                {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    contents: [{ role: "user", parts: [{ text: prompt }] }],
+                    generationConfig: {
+                      temperature: 0.2,
+                      maxOutputTokens: isPaid ? 1200 : 300,
+                    },
+                  }),
+                }
+              ),
+            ]);
 
-          const openAiData = await openAiRes.json();
-          const geminiData = await geminiRes.json();
+            const openAiData = await openAiRes.json();
+            const geminiData = await geminiRes.json();
 
-          const openAiParsed = parseAiResponse(openAiData);
-          const geminiParsed = parseGeminiResponse(geminiData);
+            const openAiParsed = parseAiResponse(openAiData);
+            const geminiParsed = parseGeminiResponse(geminiData);
 
-          page.structured = mergeWithConfidence(openAiParsed, geminiParsed, isPaid);
-          page.explanation = page.structured.explanation || "Analysis complete.";
+            page.structured = mergeWithConfidence(openAiParsed, geminiParsed, isPaid);
+            page.explanation = page.structured.explanation || "Analysis complete.";
+          } catch (aiError) {
+            console.error("AI analysis failed:", aiError);
+            page.structured = fallbackStructured(isPaid);
+            page.explanation = "Analysis temporarily unavailable. Please try again.";
+          }
         }
 
         const fullExplanation = pages
@@ -250,6 +293,7 @@ Bill text:
           }
         );
       } catch (err) {
+        console.error("Worker error:", err);
         return new Response(JSON.stringify({ error: err.message || "Processing failed" }), {
           status: 500,
           headers: { "Content-Type": "application/json", ...corsHeaders },

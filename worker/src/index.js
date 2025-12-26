@@ -1,6 +1,8 @@
 // ExplainMyBill Worker – Production Ready with "Amount Due" Fix & All Features (Dec 2025)
 // Updated for reliable PDF text extraction using pdf.js via CDN (no local install needed, fixes "Could not resolve" error).
 // Keeps Vision for images. Preserves all original logic.
+// Added enhanced Excel handling with error checks.
+// Added try-catch for all dynamic imports and processing steps for robust error handling.
 
 export default {
   async fetch(request, env, ctx) {
@@ -97,51 +99,66 @@ export default {
         let pages = [];
 
         if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {
-          pages = await processExcel(buffer);
+          try {
+            pages = await processExcel(buffer);
+          } catch (excelErr) {
+            console.error("Excel processing error:", excelErr);
+            pages = [{ page: 1, rawText: "[Excel processing failed]" }];
+          }
         } else if (fileName.endsWith(".pdf")) {
-          // Dynamically import pdf.js from CDN
-          const pdfjsLib = await import('https://cdn.jsdelivr.net/npm/pdfjs-dist@4.7.82/+esm');
-          pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.7.82/build/pdf.worker.min.mjs';
+          try {
+            // Dynamically import pdf.js from CDN
+            const pdfjsLib = await import('https://cdn.jsdelivr.net/npm/pdfjs-dist@4.7.82/+esm');
+            pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.7.82/build/pdf.worker.min.mjs';
 
-          const loadingTask = pdfjsLib.getDocument({ data: buffer });
-          const pdf = await loadingTask.promise;
-          const numPages = pdf.numPages;
+            const loadingTask = pdfjsLib.getDocument({ data: buffer });
+            const pdf = await loadingTask.promise;
+            const numPages = pdf.numPages;
 
-          for (let i = 1; i <= numPages; i++) {
-            const page = await pdf.getPage(i);
-            const content = await page.getTextContent();
-            const rawText = content.items.map(item => item.str).join(' ') || "[No text detected]";
-            pages.push({ page: i, rawText });
+            for (let i = 1; i <= numPages; i++) {
+              const page = await pdf.getPage(i);
+              const content = await page.getTextContent();
+              const rawText = content.items.map(item => item.str).join(' ') || "[No text detected]";
+              pages.push({ page: i, rawText });
+            }
+          } catch (pdfErr) {
+            console.error("PDF processing error:", pdfErr);
+            pages = [{ page: 1, rawText: "[PDF processing failed]" }];
           }
         } else if (fileName.endsWith(".png") || fileName.endsWith(".jpg") || fileName.endsWith(".jpeg")) {
-          // Image OCR with Vision
-          const res = await fetch(
-            `https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                requests: [
-                  {
-                    image: { content: base64 },
-                    features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
-                  },
-                ],
-              }),
-            }
-          );
+          try {
+            // Image OCR with Vision
+            const res = await fetch(
+              `https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  requests: [
+                    {
+                      image: { content: base64 },
+                      features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+                    },
+                  ],
+                }),
+              }
+            );
 
-          const data = await res.json();
-          if (data.error) throw new Error(data.error.message);
+            const data = await res.json();
+            if (data.error) throw new Error(data.error.message);
 
-          pages = [
-            {
-              page: 1,
-              rawText:
-                data.responses?.[0]?.fullTextAnnotation?.text ||
-                "[No text found]",
-            },
-          ];
+            pages = [
+              {
+                page: 1,
+                rawText:
+                  data.responses?.[0]?.fullTextAnnotation?.text ||
+                  "[No text found]",
+              },
+            ];
+          } catch (imageErr) {
+            console.error("Image OCR error:", imageErr);
+            pages = [{ page: 1, rawText: "[Image processing failed]" }];
+          }
         } else {
           throw new Error("Unsupported file type");
         }

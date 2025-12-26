@@ -1,4 +1,11 @@
 // ExplainMyBill Worker – Production Ready with "Amount Due" Fix & All Features (Dec 2025)
+// Updated to use pdf.js for reliable PDF text extraction, fixing the invalid Google Vision endpoint issue.
+// Keeps Vision for images. Added lifetime plan support as per code.
+
+import * as pdfjs from 'pdfjs-dist';
+import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.entry';
+
+pdfjs.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 
 export default {
   async fetch(request, env, ctx) {
@@ -97,30 +104,17 @@ export default {
         if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {
           pages = await processExcel(buffer);
         } else if (fileName.endsWith(".pdf")) {
-          const res = await fetch(
-            `https://vision.googleapis.com/v1/files:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                requests: [
-                  {
-                    inputConfig: { content: base64, mimeType: "application/pdf" },
-                    features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
-                  },
-                ],
-              }),
-            }
-          );
+          // Use pdf.js for text extraction (fixes Vision API issue)
+          const loadingTask = pdfjs.getDocument({ data: buffer });
+          const pdf = await loadingTask.promise;
+          const numPages = pdf.numPages;
 
-          const data = await res.json();
-          if (data.error) throw new Error(data.error.message);
-
-          const pageResponses = data.responses?.[0]?.responses || [];
-          pages = pageResponses.map((r, i) => ({
-            page: i + 1,
-            rawText: r.fullTextAnnotation?.text || "[No text detected]",
-          }));
+          for (let i = 1; i <= numPages; i++) {
+            const page = await pdf.getPage(i);
+            const content = await page.getTextContent();
+            const rawText = content.items.map(item => item.str).join(' ') || "[No text detected]";
+            pages.push({ page: i, rawText });
+          }
         } else {
           const res = await fetch(
             `https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`,

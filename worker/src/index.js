@@ -1,4 +1,4 @@
-// ExplainMyBill Worker – Production Ready + OCR Reliability Fix (Dec 2025)
+// ExplainMyBill Worker – Production Ready with OCR Reliability Fix & All Features (Dec 2025)
 
 export default {
   async fetch(request, env, ctx) {
@@ -81,7 +81,7 @@ export default {
           throw new Error("No bill uploaded");
         }
 
-        if (billFile.size > 15 * 1024 * 1024) { // Reduced limit for safety
+        if (billFile.size > 15 * 1024 * 1024) {
           throw new Error("File too large – please upload under 15MB");
         }
 
@@ -108,15 +108,23 @@ export default {
                     {
                       inputConfig: { content: base64, mimeType: "application/pdf" },
                       features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
-                      pages: [-1], // all pages
+                      pages: [], // Explicitly process all pages
                     },
                   ],
                 }),
               }
             );
 
+            console.log("PDF Vision response status:", res.status);
+
+            if (!res.ok) {
+              const errorText = await res.text();
+              console.log("PDF Vision error text:", errorText);
+              throw new Error(`Vision API failed with status ${res.status}: ${errorText}`);
+            }
+
             const data = await res.json();
-            console.log("PDF Vision response:", JSON.stringify(data));
+            console.log("PDF Vision full data:", JSON.stringify(data, null, 2));
 
             if (data.error) {
               throw new Error(`Vision API error: ${data.error.message}`);
@@ -132,7 +140,6 @@ export default {
               rawText: r.fullTextAnnotation?.text?.trim() || "[No text detected on this page]",
             }));
           } else {
-            // Images (PNG, JPG, etc.)
             const res = await fetch(
               `https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
               {
@@ -149,8 +156,16 @@ export default {
               }
             );
 
+            console.log("Image Vision response status:", res.status);
+
+            if (!res.ok) {
+              const errorText = await res.text();
+              console.log("Image Vision error text:", errorText);
+              throw new Error(`Vision API failed with status ${res.status}: ${errorText}`);
+            }
+
             const data = await res.json();
-            console.log("Image Vision response:", JSON.stringify(data));
+            console.log("Image Vision full data:", JSON.stringify(data, null, 2));
 
             if (data.error) {
               throw new Error(`Vision API error: ${data.error.message}`);
@@ -165,7 +180,6 @@ export default {
             ];
           }
 
-          // Final safety check
           if (pages.every(p => !p.rawText || p.rawText.includes("No text"))) {
             pages = [{
               page: 1,
@@ -181,7 +195,6 @@ export default {
           }];
         }
 
-        // AI ANALYSIS – Only if we have text
         for (const page of pages) {
           if (page.rawText.includes("OCR FAILED") || page.rawText.includes("OCR ERROR")) {
             page.structured = fallbackStructured(isPaid);
@@ -228,50 +241,44 @@ Bill text:
 """${page.rawText}"""
 `;
 
-          try {
-            const [openAiRes, geminiRes] = await Promise.all([
-              fetch("https://api.openai.com/v1/chat/completions", {
-                method: "POST",
-                headers: {
-                  Authorization: `Bearer ${env.OPENAI_API_KEY}`,
-                  "Content-Type": "application/json",
-                },
-                body: JSON.stringify({
-                  model: modelOpenAI,
-                  messages: [{ role: "user", content: prompt }],
-                  temperature: 0.2,
-                  max_tokens: isPaid ? 1200 : 300,
-                }),
+          const [openAiRes, geminiRes] = await Promise.all([
+            fetch("https://api.openai.com/v1/chat/completions", {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                model: modelOpenAI,
+                messages: [{ role: "user", content: prompt }],
+                temperature: 0.2,
+                max_tokens: isPaid ? 1200 : 300,
               }),
-              fetch(
-                `https://generativelanguage.googleapis.com/v1beta/models/${modelGemini}:generateContent?key=${env.GEMINI_API_KEY}`,
-                {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    contents: [{ role: "user", parts: [{ text: prompt }] }],
-                    generationConfig: {
-                      temperature: 0.2,
-                      maxOutputTokens: isPaid ? 1200 : 300,
-                    },
-                  }),
-                }
-              ),
-            ]);
+            }),
+            fetch(
+              `https://generativelanguage.googleapis.com/v1beta/models/${modelGemini}:generateContent?key=${env.GEMINI_API_KEY}`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  contents: [{ role: "user", parts: [{ text: prompt }] }],
+                  generationConfig: {
+                    temperature: 0.2,
+                    maxOutputTokens: isPaid ? 1200 : 300,
+                  },
+                }),
+              }
+            ),
+          ]);
 
-            const openAiData = await openAiRes.json();
-            const geminiData = await geminiRes.json();
+          const openAiData = await openAiRes.json();
+          const geminiData = await geminiRes.json();
 
-            const openAiParsed = parseAiResponse(openAiData);
-            const geminiParsed = parseGeminiResponse(geminiData);
+          const openAiParsed = parseAiResponse(openAiData);
+          const geminiParsed = parseGeminiResponse(geminiData);
 
-            page.structured = mergeWithConfidence(openAiParsed, geminiParsed, isPaid);
-            page.explanation = page.structured.explanation || "Analysis complete.";
-          } catch (aiError) {
-            console.error("AI analysis failed:", aiError);
-            page.structured = fallbackStructured(isPaid);
-            page.explanation = "Analysis temporarily unavailable. Please try again.";
-          }
+          page.structured = mergeWithConfidence(openAiParsed, geminiParsed, isPaid);
+          page.explanation = page.structured.explanation || "Analysis complete.";
         }
 
         const fullExplanation = pages
@@ -293,7 +300,7 @@ Bill text:
           }
         );
       } catch (err) {
-        console.error("Worker error:", err);
+        console.error("Worker error:", err.message, err.stack);
         return new Response(JSON.stringify({ error: err.message || "Processing failed" }), {
           status: 500,
           headers: { "Content-Type": "application/json", ...corsHeaders },

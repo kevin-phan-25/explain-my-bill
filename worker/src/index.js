@@ -1,5 +1,5 @@
-// ExplainMyBill Worker – Final Full Code Update (Dec 2025)
-// All features preserved + precise potentialSavings + robust error handling
+// ExplainMyBill Worker – Final Full Code Update with Celebrity Recognition Disabled (Dec 2025)
+// All features preserved + fix for Vision API quota error (celebrity recognition disabled)
 
 export default {
   async fetch(request, env, ctx) {
@@ -108,7 +108,7 @@ export default {
         let anyTextDetected = false;
 
         // =====================
-        // OCR – Enhanced with languageHints & PDF page limit
+        // OCR – Only DOCUMENT_TEXT_DETECTION (no celebrity recognition)
         // =====================
         if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {
           pages = await processExcel(buffer);
@@ -125,7 +125,9 @@ export default {
                       content: base64,
                       mimeType: "application/pdf",
                     },
-                    features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+                    features: [
+                      { type: "DOCUMENT_TEXT_DETECTION" } // Only this feature
+                    ],
                     imageContext: {
                       languageHints: ["en"],
                     },
@@ -137,18 +139,19 @@ export default {
           );
 
           const data = await res.json();
-          if (data.error) throw new Error(data.error.message || "Vision API error");
+          if (data.error) {
+            throw new Error(`Vision API error: ${data.error.message || JSON.stringify(data.error)}`);
+          }
 
           const pageResponses = data.responses?.[0]?.responses || [];
-          if (pageResponses.length === 0) {
-            pages = [{ page: 1, rawText: "[No text detected in document]" }];
-          } else {
-            pages = pageResponses.map((r, i) => ({
-              page: i + 1,
-              rawText: r.fullTextAnnotation?.text || "[No text on this page]",
-            }));
-          }
+          pages = pageResponses.length
+            ? pageResponses.map((r, i) => ({
+                page: i + 1,
+                rawText: r.fullTextAnnotation?.text || "[No text on this page]",
+              }))
+            : [{ page: 1, rawText: "[No text detected in document]" }];
         } else {
+          // Single images
           const res = await fetch(
             `https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
             {
@@ -158,7 +161,9 @@ export default {
                 requests: [
                   {
                     image: { content: base64 },
-                    features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+                    features: [
+                      { type: "DOCUMENT_TEXT_DETECTION" } // Only this feature
+                    ],
                     imageContext: {
                       languageHints: ["en"],
                     },
@@ -169,7 +174,9 @@ export default {
           );
 
           const data = await res.json();
-          if (data.error) throw new Error(data.error.message || "Vision API error");
+          if (data.error) {
+            throw new Error(`Vision API error: ${data.error.message || JSON.stringify(data.error)}`);
+          }
 
           pages = [
             {

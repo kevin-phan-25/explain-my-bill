@@ -1,11 +1,6 @@
 // ExplainMyBill Worker – Production Ready with "Amount Due" Fix & All Features (Dec 2025)
-// Updated to use pdf.js for reliable PDF text extraction, fixing the invalid Google Vision endpoint issue.
-// Keeps Vision for images. Added lifetime plan support as per code.
-
-import * as pdfjs from 'pdfjs-dist';
-import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.entry';
-
-pdfjs.GlobalWorkerOptions.workerSrc = pdfjsWorker;
+// Updated for reliable PDF text extraction using pdf.js via CDN (no local install needed, fixes "Could not resolve" error).
+// Keeps Vision for images. Preserves all original logic.
 
 export default {
   async fetch(request, env, ctx) {
@@ -104,8 +99,11 @@ export default {
         if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {
           pages = await processExcel(buffer);
         } else if (fileName.endsWith(".pdf")) {
-          // Use pdf.js for text extraction (fixes Vision API issue)
-          const loadingTask = pdfjs.getDocument({ data: buffer });
+          // Dynamically import pdf.js from CDN
+          const pdfjsLib = await import('https://cdn.jsdelivr.net/npm/pdfjs-dist@4.7.82/+esm');
+          pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.7.82/build/pdf.worker.min.mjs';
+
+          const loadingTask = pdfjsLib.getDocument({ data: buffer });
           const pdf = await loadingTask.promise;
           const numPages = pdf.numPages;
 
@@ -115,7 +113,8 @@ export default {
             const rawText = content.items.map(item => item.str).join(' ') || "[No text detected]";
             pages.push({ page: i, rawText });
           }
-        } else {
+        } else if (fileName.endsWith(".png") || fileName.endsWith(".jpg") || fileName.endsWith(".jpeg")) {
+          // Image OCR with Vision
           const res = await fetch(
             `https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
             {
@@ -143,7 +142,12 @@ export default {
                 "[No text found]",
             },
           ];
+        } else {
+          throw new Error("Unsupported file type");
         }
+
+        // Log for debugging (remove in production)
+        console.log("OCR pages:", pages.map(p => ({ page: p.page, rawTextSnippet: p.rawText.substring(0, 100) })));
 
         for (const page of pages) {
           const modelOpenAI = isPaid ? "gpt-4o" : "gpt-4o-mini";

@@ -1,8 +1,5 @@
-// ExplainMyBill Worker – COMPLETE FIXED Full Code (Dec 2025)
-// FIXED: Google Vision API endpoints (v1/images:annotate and v1/files:annotate are correct and working)
-// FIXED: Only DOCUMENT_TEXT_DETECTION requested (no celebrity or other features)
-// FIXED: fetchWithTimeout added to prevent hangs
-// All features preserved: Stripe, dual AI, potentialSavings, paid/free, Excel, confidence merge
+// ExplainMyBill Worker – FINAL FULL CODE UPDATE (Dec 2025)
+// All features preserved + maximum OCR reliability + precise savings + no crashes
 
 export default {
   async fetch(request, env, ctx) {
@@ -108,8 +105,13 @@ export default {
         let anyTextDetected = false;
 
         // =====================
-        // OCR – Correct Endpoints + Only DOCUMENT_TEXT_DETECTION
+        // OCR – Maximum Reliability (both DOCUMENT_TEXT_DETECTION and TEXT_DETECTION)
         // =====================
+        const features = [
+          { type: "DOCUMENT_TEXT_DETECTION" },
+          { type: "TEXT_DETECTION" }, // Fallback for difficult layouts
+        ];
+
         if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {
           pages = await processExcel(buffer);
         } else if (fileName.endsWith(".pdf")) {
@@ -121,11 +123,8 @@ export default {
               body: JSON.stringify({
                 requests: [
                   {
-                    inputConfig: {
-                      content: base64,
-                      mimeType: "application/pdf",
-                    },
-                    features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+                    inputConfig: { content: base64, mimeType: "application/pdf" },
+                    features,
                     imageContext: { languageHints: ["en"] },
                     pages: [1, 2, 3, 4, 5],
                   },
@@ -135,15 +134,13 @@ export default {
           );
 
           const data = await res.json();
-          if (data.error) {
-            throw new Error(`Vision API error: ${data.error.message || "Unknown error"}`);
-          }
+          if (data.error) throw new Error(`Vision API error: ${data.error.message || "Unknown error"}`);
 
           const pageResponses = data.responses?.[0]?.responses || [];
           pages = pageResponses.length
             ? pageResponses.map((r, i) => ({
                 page: i + 1,
-                rawText: r.fullTextAnnotation?.text || "[No text on this page]",
+                rawText: r.fullTextAnnotation?.text || r.textAnnotation?.text || "[No text on this page]",
               }))
             : [{ page: 1, rawText: "[No text detected in PDF]" }];
         } else {
@@ -156,7 +153,7 @@ export default {
                 requests: [
                   {
                     image: { content: base64 },
-                    features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+                    features,
                     imageContext: { languageHints: ["en"] },
                   },
                 ],
@@ -165,18 +162,12 @@ export default {
           );
 
           const data = await res.json();
-          if (data.error) {
-            throw new Error(`Vision API error: ${data.error.message || "Unknown error"}`);
-          }
+          if (data.error) throw new Error(`Vision API error: ${data.error.message || "Unknown error"}`);
 
-          pages = [
-            {
-              page: 1,
-              rawText:
-                data.responses?.[0]?.fullTextAnnotation?.text ||
-                "[No text found in image]",
-            },
-          ];
+          const response = data.responses?.[0] || {};
+          const rawText = response.fullTextAnnotation?.text || response.textAnnotation?.text || "[No text found in image]";
+
+          pages = [{ page: 1, rawText }];
         }
 
         // Detect meaningful text
@@ -187,7 +178,7 @@ export default {
         }
 
         // =====================
-        // AI ANALYSIS – With Precise Savings
+        // AI ANALYSIS – Precise Savings with Real-World Rules
         // =====================
         for (const page of pages) {
           const modelOpenAI = isPaid ? "gpt-4o" : "gpt-4o-mini";
@@ -328,7 +319,7 @@ Bill text:
 };
 
 // =====================
-// HELPERS – FULL & FIXED
+// HELPERS – FULL & FINAL
 // =====================
 async function fetchWithTimeout(url, options = {}, timeout = 15000) {
   const controller = new AbortController();

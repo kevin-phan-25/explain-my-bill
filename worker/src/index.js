@@ -82,12 +82,14 @@ export default {
 
         const features = [{ type: "DOCUMENT_TEXT_DETECTION" }];
 
+        // ===================== PDFs → async batch OCR =====================
         if (fileName.endsWith(".pdf")) {
-          pages = await preprocessAndRetryPDF(buffer, features, env, 3);
+          pages = await asyncBatchPDF(buffer, env);
         } else if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {
           pages = await processExcel(buffer);
         } else {
-          pages = await preprocessAndRetryImage(base64, features, env, 3);
+          // ===================== IMAGES → preprocess + retry (fast) =====================
+          pages = await preprocessAndRetryImage(base64, features, env, 3, 1000, 3000);
         }
 
         // Detect meaningful text
@@ -276,20 +278,27 @@ async function processExcel(buffer) {
   }));
 }
 
-// ===================== IMAGE PREPROCESS + RETRY =====================
-async function preprocessAndRetryImage(base64, features, env, retries = 3) {
+// ===================== PREPROCESS + RETRY IMAGE OCR =====================
+async function preprocessAndRetryImage(base64, features, env, retries = 3, minDelay = 1000, maxDelay = 3000) {
   let lastPages = [{ page: 1, rawText: "[No text detected]" }];
 
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      const preprocessedBase64 = await upscaleImage(base64); // upscale + contrast
+      const preprocessedBase64 = await upscaleImage(base64); // upscale + enhance contrast
+
       const res = await fetchWithTimeout(
         `https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            requests: [{ image: { content: preprocessedBase64 }, features, imageContext: { languageHints: ["en"] } }],
+            requests: [
+              {
+                image: { content: preprocessedBase64 },
+                features,
+                imageContext: { languageHints: ["en"] }
+              },
+            ],
           }),
         }
       );
@@ -298,38 +307,21 @@ async function preprocessAndRetryImage(base64, features, env, retries = 3) {
       const resp = data.responses?.[0];
       const rawText = resp?.fullTextAnnotation?.text || "";
 
-      if (rawText.trim().length > 20) return [{ page: 1, rawText }];
-      lastPages = [{ page: 1, rawText: "[No text detected]" }];
-    } catch (err) { console.error("Vision retry error:", err); }
+      if (rawText.trim().length > 20) {
+        return [{ page: 1, rawText }];
+      } else {
+        lastPages = [{ page: 1, rawText: "[No text detected]" }];
+      }
+    } catch (err) {
+      console.error("Vision retry error:", err);
+    }
 
-    const waitMs = 15000 + Math.floor(Math.random() * 15000); // 15–30s delay
-    console.log(`Retry attempt ${attempt} — waiting ${waitMs / 1000}s`);
+    // random small delay (1–3s)
+    const waitMs = minDelay + Math.floor(Math.random() * (maxDelay - minDelay));
     await new Promise(r => setTimeout(r, waitMs));
   }
 
   return lastPages;
-}
-
-// ===================== PDF PREPROCESS + RETRY =====================
-async function preprocessAndRetryPDF(buffer, features, env, retries = 3) {
-  const pdfjsLib = await import("https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.492/pdf.min.js");
-  const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
-  const pages = [];
-
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i);
-    const viewport = page.getViewport({ scale: 2 });
-    const canvas = new OffscreenCanvas(viewport.width, viewport.height);
-    const ctx = canvas.getContext("2d");
-    await page.render({ canvasContext: ctx, viewport }).promise;
-    const imgBlob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.9 });
-    const imgBase64 = uint8ArrayToBase64(new Uint8Array(await imgBlob.arrayBuffer()));
-
-    const ocrPages = await preprocessAndRetryImage(imgBase64, features, env, retries);
-    pages.push(...ocrPages.map(p => ({ page: i, rawText: p.rawText })));
-  }
-
-  return pages;
 }
 
 // ===================== IMAGE UPSCALE (IN-MEMORY) =====================

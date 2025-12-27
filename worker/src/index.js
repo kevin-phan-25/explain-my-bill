@@ -1,5 +1,5 @@
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
     const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -11,7 +11,9 @@ export default {
     }
 
     if (request.method !== "POST") {
-      return new Response("ExplainMyBill OCR Worker running", { headers: corsHeaders });
+      return new Response("ExplainMyBill – Google Vision OCR Worker", {
+        headers: corsHeaders,
+      });
     }
 
     try {
@@ -19,193 +21,128 @@ export default {
       const file = formData.get("bill");
 
       if (!file) throw new Error("No file uploaded");
-      if (file.size > 20 * 1024 * 1024) throw new Error("File too large (20MB max)");
+      if (file.size > 10 * 1024 * 1024)
+        throw new Error("File too large (max 10MB for Vision)");
 
-      const buffer = await file.arrayBuffer();
-      const bytes = new Uint8Array(buffer);
-      const base64 = uint8ArrayToBase64(bytes);
       const fileName = file.name.toLowerCase();
+      const buffer = await file.arrayBuffer();
+      const base64 = safeBase64(new Uint8Array(buffer));
 
       let pages = [];
-      let ocrEngineUsed = "none";
 
-      /* ================= GOOGLE VISION FIRST ================= */
-
-      try {
-        if (fileName.endsWith(".pdf")) {
-          pages = await googlePdfOCR(buffer, env);
-        } else {
-          pages = await googleImageOCR(base64, env);
-        }
-
-        if (pages.some(p => p.rawText && p.rawText.length > 40)) {
-          ocrEngineUsed = "google";
-        } else {
-          pages = [];
-        }
-      } catch (err) {
-        console.error("Google OCR failed:", err);
-        pages = [];
+      if (fileName.endsWith(".pdf")) {
+        pages = await ocrPdf(base64, env);
+      } else if (fileName.match(/\.(jpg|jpeg|png)$/)) {
+        pages = await ocrImage(base64, env);
+      } else {
+        throw new Error("Unsupported file type");
       }
 
-      /* ================= OCR.SPACE FALLBACK ================= */
-
-      if (pages.length === 0) {
-        if (fileName.endsWith(".pdf")) {
-          pages = await ocrSpacePdfOCR(base64, env);
-        } else {
-          pages = await ocrSpaceImageOCR(base64, env);
-        }
-        ocrEngineUsed = "ocr_space";
-      }
-
-      const combinedText = pages.map(p => p.rawText || "").join("\n\n").trim();
-      const detected = combinedText.length > 40;
+      const combinedText = pages.map(p => p.rawText).join("\n\n").trim();
+      const detected = combinedText.length > 30;
 
       return new Response(
         JSON.stringify({
-          success: true,
-          detected,
-          ocrEngineUsed,
+          ocrDetected: detected,
           textLength: combinedText.length,
-          pages: pages.map(p => ({
-            page: p.page,
-            hasText: p.rawText.length > 0,
-          })),
-          preview: detected ? combinedText.slice(0, 600) : "",
+          pages,
+          preview: detected ? combinedText.slice(0, 600) + "..." : "",
         }),
-        { headers: { "Content-Type": "application/json", ...corsHeaders } }
+        {
+          headers: {
+            "Content-Type": "application/json",
+            ...corsHeaders,
+          },
+        }
       );
     } catch (err) {
-      console.error("Worker fatal error:", err);
+      console.error(err);
       return new Response(
-        JSON.stringify({ success: false, error: err.message }),
-        { status: 500, headers: { "Content-Type": "application/json", ...corsHeaders } }
+        JSON.stringify({ error: err.message }),
+        {
+          status: 500,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        }
       );
     }
   },
 };
 
-/* ===================================================== */
-/* ================= GOOGLE VISION ===================== */
-/* ===================================================== */
+/* ================= GOOGLE VISION ================= */
 
-async function googleImageOCR(base64, env) {
+async function ocrImage(base64, env) {
   const res = await fetch(
     `https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        requests: [{
-          image: { content: base64 },
-          features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
-          imageContext: { languageHints: ["en"] },
-        }],
+        requests: [
+          {
+            image: { content: base64 },
+            features: [
+              { type: "DOCUMENT_TEXT_DETECTION" },
+              { type: "TEXT_DETECTION" },
+            ],
+            imageContext: { languageHints: ["en"] },
+          },
+        ],
       }),
     }
   );
 
   const data = await res.json();
-  const text =
-    data.responses?.[0]?.fullTextAnnotation?.text ||
-    data.responses?.[0]?.textAnnotations?.[0]?.description ||
+  const resp = data.responses?.[0];
+
+  const full =
+    resp?.fullTextAnnotation?.text ||
+    resp?.textAnnotations?.map(t => t.description).join("\n") ||
     "";
 
-  return [{ page: 1, rawText: text.trim() }];
+  return [{ page: 1, rawText: full.trim() }];
 }
 
-async function googlePdfOCR(buffer, env) {
-  const base64 = uint8ArrayToBase64(new Uint8Array(buffer));
-
-  const start = await fetch(
-    `https://vision.googleapis.com/v1/files:asyncBatchAnnotate?key=${env.GOOGLE_VISION_API_KEY}`,
+async function ocrPdf(base64, env) {
+  const res = await fetch(
+    `https://vision.googleapis.com/v1/files:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        requests: [{
-          inputConfig: { content: base64, mimeType: "application/pdf" },
-          features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
-        }],
+        requests: [
+          {
+            inputConfig: {
+              content: base64,
+              mimeType: "application/pdf",
+            },
+            features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+            pages: [1, 2, 3, 4, 5],
+          },
+        ],
       }),
     }
   );
 
-  const { name } = await start.json();
+  const data = await res.json();
+  const responses = data.responses?.[0]?.responses || [];
 
-  for (let i = 0; i < 25; i++) {
-    await new Promise(r => setTimeout(r, 2000));
-
-    const poll = await fetch(
-      `https://vision.googleapis.com/v1/${name}?key=${env.GOOGLE_VISION_API_KEY}`
-    );
-    const data = await poll.json();
-
-    if (data.done) {
-      return (data.responses || []).map((r, i) => ({
-        page: i + 1,
-        rawText: r.fullTextAnnotation?.text?.trim() || "",
-      }));
-    }
+  if (!responses.length) {
+    return [{ page: 1, rawText: "" }];
   }
 
-  return [];
+  return responses.map((r, i) => ({
+    page: i + 1,
+    rawText: r.fullTextAnnotation?.text?.trim() || "",
+  }));
 }
 
-/* ===================================================== */
-/* ================= OCR.SPACE ========================= */
-/* ===================================================== */
+/* ================= SAFE BASE64 ================= */
 
-async function ocrSpaceImageOCR(base64, env) {
-  const res = await fetch("https://api.ocr.space/parse/image", {
-    method: "POST",
-    headers: {
-      apikey: env.OCR_SPACE_API_KEY,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams({
-      base64Image: `data:image/jpeg;base64,${base64}`,
-      language: "eng",
-      OCREngine: "2",
-      scale: "true",
-    }),
-  });
-
-  const data = await res.json();
-  const text = data.ParsedResults?.[0]?.ParsedText || "";
-  return [{ page: 1, rawText: text.trim() }];
-}
-
-async function ocrSpacePdfOCR(base64, env) {
-  const res = await fetch("https://api.ocr.space/parse/image", {
-    method: "POST",
-    headers: {
-      apikey: env.OCR_SPACE_API_KEY,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams({
-      base64Image: `data:application/pdf;base64,${base64}`,
-      language: "eng",
-      OCREngine: "2",
-      isOverlayRequired: "false",
-    }),
-  });
-
-  const data = await res.json();
-  const text = data.ParsedResults?.[0]?.ParsedText || "";
-  return [{ page: 1, rawText: text.trim() }];
-}
-
-/* ===================================================== */
-/* ================= UTILS ============================== */
-/* ===================================================== */
-
-function uint8ArrayToBase64(arr) {
+function safeBase64(uint8) {
   let binary = "";
-  const chunk = 0x8000;
-  for (let i = 0; i < arr.length; i += chunk) {
-    binary += String.fromCharCode(...arr.subarray(i, i + chunk));
+  const chunk = 0x4000;
+  for (let i = 0; i < uint8.length; i += chunk) {
+    binary += String.fromCharCode(...uint8.subarray(i, i + chunk));
   }
   return btoa(binary);
 }

@@ -82,13 +82,11 @@ export default {
 
         const features = [{ type: "DOCUMENT_TEXT_DETECTION" }];
 
-        // ===================== PDFs → async batch OCR =====================
         if (fileName.endsWith(".pdf")) {
-          pages = await asyncBatchPDF(buffer, env);
+          pages = await preprocessAndRetryPDF(buffer, features, env, 3);
         } else if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {
           pages = await processExcel(buffer);
         } else {
-          // ===================== IMAGES → preprocess + retry =====================
           pages = await preprocessAndRetryImage(base64, features, env, 3);
         }
 
@@ -278,27 +276,20 @@ async function processExcel(buffer) {
   }));
 }
 
-// ===================== PREPROCESS + RETRY IMAGE OCR =====================
+// ===================== IMAGE PREPROCESS + RETRY =====================
 async function preprocessAndRetryImage(base64, features, env, retries = 3) {
   let lastPages = [{ page: 1, rawText: "[No text detected]" }];
 
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      const preprocessedBase64 = await upscaleImage(base64); // upscale + enhance contrast
-
+      const preprocessedBase64 = await upscaleImage(base64); // upscale + contrast
       const res = await fetchWithTimeout(
         `https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            requests: [
-              {
-                image: { content: preprocessedBase64 },
-                features,
-                imageContext: { languageHints: ["en"] }
-              },
-            ],
+            requests: [{ image: { content: preprocessedBase64 }, features, imageContext: { languageHints: ["en"] } }],
           }),
         }
       );
@@ -307,24 +298,42 @@ async function preprocessAndRetryImage(base64, features, env, retries = 3) {
       const resp = data.responses?.[0];
       const rawText = resp?.fullTextAnnotation?.text || "";
 
-      if (rawText.trim().length > 20) {
-        return [{ page: 1, rawText }];
-      } else {
-        lastPages = [{ page: 1, rawText: "[No text detected]" }];
-      }
-    } catch (err) {
-      console.error("Vision retry error:", err);
-    }
-    // wait 1s before retrying
-    await new Promise(r => setTimeout(r, 1000));
+      if (rawText.trim().length > 20) return [{ page: 1, rawText }];
+      lastPages = [{ page: 1, rawText: "[No text detected]" }];
+    } catch (err) { console.error("Vision retry error:", err); }
+
+    const waitMs = 15000 + Math.floor(Math.random() * 15000); // 15–30s delay
+    console.log(`Retry attempt ${attempt} — waiting ${waitMs / 1000}s`);
+    await new Promise(r => setTimeout(r, waitMs));
   }
 
   return lastPages;
 }
 
+// ===================== PDF PREPROCESS + RETRY =====================
+async function preprocessAndRetryPDF(buffer, features, env, retries = 3) {
+  const pdfjsLib = await import("https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.492/pdf.min.js");
+  const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+  const pages = [];
+
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const viewport = page.getViewport({ scale: 2 });
+    const canvas = new OffscreenCanvas(viewport.width, viewport.height);
+    const ctx = canvas.getContext("2d");
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    const imgBlob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.9 });
+    const imgBase64 = uint8ArrayToBase64(new Uint8Array(await imgBlob.arrayBuffer()));
+
+    const ocrPages = await preprocessAndRetryImage(imgBase64, features, env, retries);
+    pages.push(...ocrPages.map(p => ({ page: i, rawText: p.rawText })));
+  }
+
+  return pages;
+}
+
 // ===================== IMAGE UPSCALE (IN-MEMORY) =====================
 async function upscaleImage(base64) {
-  // Use OffscreenCanvas in Cloudflare Workers
   const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
   const img = await createImageBitmap(new Blob([bytes]));
   const scale = Math.max(1500 / img.width, 1500 / img.height, 1);

@@ -80,65 +80,16 @@ export default {
         let pages = [];
         let anyTextDetected = false;
 
-        // ===================== OCR =====================
-        const features = [{ type: "DOCUMENT_TEXT_DETECTION" }]; // ← NO TEXT_DETECTION fallback
+        const features = [{ type: "DOCUMENT_TEXT_DETECTION" }];
 
-        if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {
+        // ===================== PDFs → async batch OCR =====================
+        if (fileName.endsWith(".pdf")) {
+          pages = await asyncBatchPDF(buffer, env);
+        } else if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {
           pages = await processExcel(buffer);
-        } else if (fileName.endsWith(".pdf")) {
-          const res = await fetchWithTimeout(
-            `https://vision.googleapis.com/v1/files:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                requests: [
-                  {
-                    inputConfig: { content: base64, mimeType: "application/pdf" },
-                    features,
-                    imageContext: { languageHints: ["en"] },
-                    pages: [1, 2, 3, 4, 5],
-                  },
-                ],
-              }),
-            }
-          );
-
-          const data = await res.json();
-          if (data.error) throw new Error(`Vision API error: ${data.error.message || "Unknown"}`);
-
-          const pageResponses = data.responses?.[0]?.responses || [];
-          pages = pageResponses.length
-            ? pageResponses.map((r, i) => ({
-                page: i + 1,
-                rawText: r.fullTextAnnotation?.text || "[No text on this page]",
-              }))
-            : [{ page: 1, rawText: "[No text detected in PDF]" }];
         } else {
-          // Images
-          const res = await fetchWithTimeout(
-            `https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                requests: [
-                  {
-                    image: { content: base64 },
-                    features,
-                    imageContext: { languageHints: ["en"], textDetectionParams: { enableTextDetectionConfidenceScore: true } },
-                  },
-                ],
-              }),
-            }
-          );
-
-          const data = await res.json();
-          if (data.error) throw new Error(`Vision API error: ${data.error.message || "Unknown"}`);
-
-          const resp = data.responses?.[0] || {};
-          const rawText = resp.fullTextAnnotation?.text || "[No text found in image]";
-          pages = [{ page: 1, rawText }];
+          // ===================== IMAGES → preprocess + retry =====================
+          pages = await preprocessAndRetryImage(base64, features, env, 3);
         }
 
         // Detect meaningful text
@@ -325,4 +276,65 @@ async function processExcel(buffer) {
     page: i + 1,
     rawText: XLSX.utils.sheet_to_csv(wb.Sheets[name]) || "[Empty sheet]"
   }));
+}
+
+// ===================== PREPROCESS + RETRY IMAGE OCR =====================
+async function preprocessAndRetryImage(base64, features, env, retries = 3) {
+  let lastPages = [{ page: 1, rawText: "[No text detected]" }];
+
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const preprocessedBase64 = await upscaleImage(base64); // upscale + enhance contrast
+
+      const res = await fetchWithTimeout(
+        `https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            requests: [
+              {
+                image: { content: preprocessedBase64 },
+                features,
+                imageContext: { languageHints: ["en"] }
+              },
+            ],
+          }),
+        }
+      );
+
+      const data = await res.json();
+      const resp = data.responses?.[0];
+      const rawText = resp?.fullTextAnnotation?.text || "";
+
+      if (rawText.trim().length > 20) {
+        return [{ page: 1, rawText }];
+      } else {
+        lastPages = [{ page: 1, rawText: "[No text detected]" }];
+      }
+    } catch (err) {
+      console.error("Vision retry error:", err);
+    }
+    // wait 1s before retrying
+    await new Promise(r => setTimeout(r, 1000));
+  }
+
+  return lastPages;
+}
+
+// ===================== IMAGE UPSCALE (IN-MEMORY) =====================
+async function upscaleImage(base64) {
+  // Use OffscreenCanvas in Cloudflare Workers
+  const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+  const img = await createImageBitmap(new Blob([bytes]));
+  const scale = Math.max(1500 / img.width, 1500 / img.height, 1);
+
+  const canvas = new OffscreenCanvas(img.width * scale, img.height * scale);
+  const ctx = canvas.getContext("2d");
+  ctx.filter = "contrast(1.3) brightness(1.1)";
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+  const blob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.9 });
+  const arrayBuffer = await blob.arrayBuffer();
+  return uint8ArrayToBase64(new Uint8Array(arrayBuffer));
 }

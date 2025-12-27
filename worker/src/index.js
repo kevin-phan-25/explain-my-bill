@@ -1,148 +1,168 @@
 export default {
   async fetch(request, env) {
-    const corsHeaders = {
+    const cors = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "POST, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type",
     };
 
     if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: corsHeaders });
-    }
-
-    if (request.method !== "POST") {
-      return new Response("ExplainMyBill – Google Vision OCR Worker", {
-        headers: corsHeaders,
-      });
+      return new Response(null, { status: 204, headers: cors });
     }
 
     try {
       const formData = await request.formData();
       const file = formData.get("bill");
-
       if (!file) throw new Error("No file uploaded");
-      if (file.size > 10 * 1024 * 1024)
-        throw new Error("File too large (max 10MB for Vision)");
 
-      const fileName = file.name.toLowerCase();
       const buffer = await file.arrayBuffer();
-      const base64 = safeBase64(new Uint8Array(buffer));
+      const uint8 = new Uint8Array(buffer);
+      const base64 = uint8ArrayToBase64(uint8);
+      const fileName = file.name.toLowerCase();
 
-      let pages = [];
+      /* ================= OCR ================= */
 
-      if (fileName.endsWith(".pdf")) {
-        pages = await ocrPdf(base64, env);
-      } else if (fileName.match(/\.(jpg|jpeg|png)$/)) {
-        pages = await ocrImage(base64, env);
-      } else {
-        throw new Error("Unsupported file type");
+      let ocrText = await ocrOCRSpace(uint8, fileName, env);
+
+      if (ocrText.length < 40) {
+        ocrText = fileName.endsWith(".pdf")
+          ? await visionOCR(base64, env)
+          : await visionOCR(base64, env);
       }
 
-      const combinedText = pages.map(p => p.rawText).join("\n\n").trim();
-      const detected = combinedText.length > 30;
+      if (ocrText.length < 40) {
+        return json({
+          explanation: "No readable text detected.",
+          structured: emptyStructured(),
+        }, cors);
+      }
 
-      return new Response(
-        JSON.stringify({
-          ocrDetected: detected,
-          textLength: combinedText.length,
-          pages,
-          preview: detected ? combinedText.slice(0, 600) + "..." : "",
-        }),
-        {
-          headers: {
-            "Content-Type": "application/json",
-            ...corsHeaders,
-          },
-        }
-      );
+      /* ================= AI ANALYSIS ================= */
+
+      const aiResult = env.OPENAI_API_KEY
+        ? await analyzeWithOpenAI(ocrText, env)
+        : await analyzeWithGemini(ocrText, env);
+
+      return json({
+        isPaid: false,
+        explanation: aiResult.explanation,
+        structured: aiResult.structured,
+        features: {
+          ocrStatus: "success",
+          aiStatus: "success",
+          confidence: aiResult.confidence,
+        },
+      }, cors);
+
     } catch (err) {
-      console.error(err);
-      return new Response(
-        JSON.stringify({ error: err.message }),
-        {
-          status: 500,
-          headers: { "Content-Type": "application/json", ...corsHeaders },
-        }
-      );
+      return json({ error: err.message }, cors, 500);
     }
   },
 };
 
-/* ================= GOOGLE VISION ================= */
+/* ================= OCR ================= */
 
-async function ocrImage(base64, env) {
+async function ocrOCRSpace(uint8, fileName, env) {
+  const form = new FormData();
+  form.append("file", new Blob([uint8]), fileName);
+  form.append("language", "eng");
+  form.append("OCREngine", "2");
+
+  const res = await fetch("https://api.ocr.space/parse/image", {
+    method: "POST",
+    headers: { apikey: env.OCR_SPACE_API_KEY },
+    body: form,
+  });
+
+  const data = await res.json();
+  return data?.ParsedResults?.map(p => p.ParsedText).join("\n") || "";
+}
+
+async function visionOCR(base64, env) {
   const res = await fetch(
     `https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        requests: [
-          {
-            image: { content: base64 },
-            features: [
-              { type: "DOCUMENT_TEXT_DETECTION" },
-              { type: "TEXT_DETECTION" },
-            ],
-            imageContext: { languageHints: ["en"] },
-          },
-        ],
+        requests: [{
+          image: { content: base64 },
+          features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+        }],
       }),
     }
   );
 
-  const data = await res.json();
-  const resp = data.responses?.[0];
-
-  const full =
-    resp?.fullTextAnnotation?.text ||
-    resp?.textAnnotations?.map(t => t.description).join("\n") ||
-    "";
-
-  return [{ page: 1, rawText: full.trim() }];
+  const json = await res.json();
+  return json.responses?.[0]?.fullTextAnnotation?.text || "";
 }
 
-async function ocrPdf(base64, env) {
+/* ================= AI ================= */
+
+async function analyzeWithOpenAI(text, env) {
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      temperature: 0,
+      messages: [{
+        role: "system",
+        content: "Extract medical bill amounts. Respond ONLY JSON.",
+      },{
+        role: "user",
+        content: text,
+      }],
+    }),
+  });
+
+  const data = await res.json();
+  return JSON.parse(data.choices[0].message.content);
+}
+
+async function analyzeWithGemini(text, env) {
   const res = await fetch(
-    `https://vision.googleapis.com/v1/files:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
+    `https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key=${env.GEMINI_API_KEY}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        requests: [
-          {
-            inputConfig: {
-              content: base64,
-              mimeType: "application/pdf",
-            },
-            features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
-            pages: [1, 2, 3, 4, 5],
-          },
-        ],
+        contents: [{ parts: [{ text }] }],
       }),
     }
   );
 
   const data = await res.json();
-  const responses = data.responses?.[0]?.responses || [];
-
-  if (!responses.length) {
-    return [{ page: 1, rawText: "" }];
-  }
-
-  return responses.map((r, i) => ({
-    page: i + 1,
-    rawText: r.fullTextAnnotation?.text?.trim() || "",
-  }));
+  return JSON.parse(data.candidates[0].content.parts[0].text);
 }
 
-/* ================= SAFE BASE64 ================= */
+/* ================= HELPERS ================= */
 
-function safeBase64(uint8) {
+function emptyStructured() {
+  return {
+    summary: "",
+    keyAmounts: {
+      totalCharges: null,
+      insurancePaid: null,
+      patientResponsibility: null,
+    },
+  };
+}
+
+function uint8ArrayToBase64(arr) {
   let binary = "";
-  const chunk = 0x4000;
-  for (let i = 0; i < uint8.length; i += chunk) {
-    binary += String.fromCharCode(...uint8.subarray(i, i + chunk));
+  for (let i = 0; i < arr.length; i += 0x8000) {
+    binary += String.fromCharCode(...arr.subarray(i, i + 0x8000));
   }
   return btoa(binary);
+}
+
+function json(data, headers, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "Content-Type": "application/json", ...headers },
+  });
 }

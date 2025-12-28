@@ -90,7 +90,6 @@ export default {
             }
           } catch (e) {
             console.error("Failed to verify Stripe session:", e);
-            // Do not grant paid access if verification fails
           }
         }
 
@@ -103,14 +102,14 @@ export default {
 
         const features = [{ type: "DOCUMENT_TEXT_DETECTION" }];
 
-        // ===================== PDFs → async batch OCR =====================
+        // ===================== FILE PROCESSING =====================
         if (fileName.endsWith(".pdf")) {
           pages = await asyncBatchPDF(buffer, env);
         } else if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {
           pages = await processExcel(buffer);
         } else {
-          // ===================== IMAGES → preprocess + retry (fast) =====================
-          pages = await preprocessAndRetryImage(base64, features, env, 3, 1000, 3000);
+          // Images – now with enhanced OCR
+          pages = await preprocessAndRetryImage(base64, features, env);
         }
 
         // Detect meaningful text
@@ -127,7 +126,7 @@ export default {
 
           const prompt = `You are an expert medical bill analyst using real-world data. Analyze the bill text and respond in JSON only.
 Bill text:
-"""${page.rawText}"""`;
+"""${page.rawText || ""}"""`;
 
           let openAiParsed = null;
           let geminiParsed = null;
@@ -184,7 +183,7 @@ Bill text:
         if (!anyTextDetected) {
           fullExplanation =
             (isPaid
-              ? "No readable text was detected. Try a clearer version or searchable PDF."
+              ? "No readable text was detected. Try a clearer, well-lit photo or searchable PDF."
               : "No readable text detected. Upgrade for advanced processing.") +
             "\n\n" + fullExplanation;
         }
@@ -299,7 +298,6 @@ async function processExcel(buffer) {
   }));
 }
 
-// ===================== PDF OCR – ASYNC BATCH (ADDED) =====================
 async function asyncBatchPDF(buffer, env) {
   const base64 = uint8ArrayToBase64(new Uint8Array(buffer));
 
@@ -347,13 +345,22 @@ async function asyncBatchPDF(buffer, env) {
   }
 }
 
-// ===================== PREPROCESS + RETRY IMAGE OCR =====================
-async function preprocessAndRetryImage(base64, features, env, retries = 3, minDelay = 1000, maxDelay = 3000) {
-  let lastPages = [{ page: 1, rawText: "[No text detected]" }];
+// ===================== ENHANCED IMAGE OCR – BEST FOR MEDICAL BILLS =====================
+async function preprocessAndRetryImage(base64, features, env, retries = 4) {
+  let bestText = "";
+  let bestPages = [{ page: 1, rawText: "[No text detected]" }];
+
+  const enhancementLevels = [
+    "contrast(1.4) brightness(1.15)",
+    "contrast(1.7) brightness(1.3)",
+    "contrast(2.0) brightness(1.4) saturate(1.2)",
+    "contrast(2.3) brightness(1.5) saturate(1.3)",
+  ];
 
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      const preprocessedBase64 = await upscaleImage(base64);
+      const filter = enhancementLevels[Math.min(attempt - 1, enhancementLevels.length - 1)];
+      const enhancedBase64 = await enhanceImage(base64, filter);
 
       const res = await fetchWithTimeout(
         `https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
@@ -361,54 +368,63 @@ async function preprocessAndRetryImage(base64, features, env, retries = 3, minDe
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            requests: [
-              {
-                image: { content: preprocessedBase64 },
-                features,
-                imageContext: { languageHints: ["en"] }
-              },
-            ],
+            requests: [{
+              image: { content: enhancedBase64 },
+              features,
+              imageContext: { languageHints: ["en"] },
+            }],
           }),
         }
       );
 
       const data = await res.json();
-      const resp = data.responses?.[0];
-      const rawText = resp?.fullTextAnnotation?.text || "";
+      const rawText = data.responses?.[0]?.fullTextAnnotation?.text?.trim() || "";
 
-      if (rawText.trim().length > 20) {
-        return [{ page: 1, rawText }];
-      } else {
-        lastPages = [{ page: 1, rawText: "[No text detected]" }];
+      if (rawText.length > bestText.length) {
+        bestText = rawText;
+      }
+
+      if (bestText.length > 150) {
+        return [{ page: 1, rawText: bestText }];
       }
     } catch (err) {
-      console.error("Vision retry error:", err);
+      console.error(`Image OCR attempt ${attempt} failed:`, err);
     }
 
-    const waitMs = minDelay + Math.floor(Math.random() * (maxDelay - minDelay));
-    await new Promise(r => setTimeout(r, waitMs));
+    // Short delay between attempts
+    await new Promise(r => setTimeout(r, 800 + Math.random() * 1200));
   }
 
-  return lastPages;
+  return [{ page: 1, rawText: bestText || "[No text detected]" }];
 }
 
-// ===================== IMAGE UPSCALE (IN-MEMORY) – ADDED BACK =====================
-async function upscaleImage(base64) {
+// ===================== STRONGER IMAGE ENHANCEMENT =====================
+async function enhanceImage(base64, filter = "contrast(1.6) brightness(1.2)") {
   try {
     const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
     const img = await createImageBitmap(new Blob([bytes]));
-    const scale = Math.max(1500 / img.width, 1500 / img.height, 1);
+
+    const targetMin = 1800;
+    const scale = Math.max(targetMin / Math.min(img.width, img.height), 1.8);
 
     const canvas = new OffscreenCanvas(img.width * scale, img.height * scale);
     const ctx = canvas.getContext("2d");
-    ctx.filter = "contrast(1.3) brightness(1.1)";
+
+    ctx.filter = filter;
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
-    const blob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.9 });
-    const arrayBuffer = await blob.arrayBuffer();
-    return uint8ArrayToBase64(new Uint8Array(arrayBuffer));
+    // Light unsharp mask for sharper text
+    ctx.globalCompositeOperation = "overlay";
+    ctx.globalAlpha = 0.25;
+    ctx.drawImage(canvas, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+
+    const blob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.95 });
+    const buffer = await blob.arrayBuffer();
+    return uint8ArrayToBase64(new Uint8Array(buffer));
   } catch (err) {
-    console.error("Upscale failed:", err);
-    return base64; // fallback
+    console.error("Image enhancement failed:", err);
+    return base64;
   }
 }

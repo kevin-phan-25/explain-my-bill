@@ -11,7 +11,7 @@ export default {
     }
 
     if (request.method !== "POST") {
-      return new Response("ExplainMyBill Worker running – no data retained", {
+      return new Response("ExplainMyBill Worker – secure & private", {
         headers: corsHeaders,
       });
     }
@@ -23,7 +23,7 @@ export default {
       if (url.pathname === "/create-checkout-session") {
         const { plan } = await request.json();
         if (!["monthly", "one-time"].includes(plan)) {
-          throw new Error("Invalid plan");
+          throw new Error("Invalid plan selected");
         }
 
         const priceId =
@@ -52,55 +52,71 @@ export default {
         );
 
         const data = await stripeRes.json();
-        if (!data.id) throw new Error("Failed to create checkout session");
+        if (!data.id) {
+          throw new Error("Failed to create payment session");
+        }
 
         return new Response(JSON.stringify({ id: data.id }), {
           headers: { "Content-Type": "application/json", ...corsHeaders },
         });
       }
 
-      /* ================= FILE UPLOAD WITH PRIVACY ================= */
-      // Anonymous rate limiting: only counts requests per IP (no identifiers stored long-term)
+      /* ================= FILE UPLOAD – SAFE PARSING ================= */
+      // Anonymous rate limiting (12 per hour per IP)
       const ip = request.headers.get("CF-Connecting-IP") || "unknown";
       const rateKey = `rate:${ip}`;
       let attempts = (await env.KV.get(rateKey, { type: "json" })) || 0;
-      if (attempts >= 12) { // ~12 free uses per hour
-        return new Response(JSON.stringify({ error: "Too many requests. Please try again later." }), {
-          status: 429,
-          headers: { "Content-Type": "application/json", ...corsHeaders },
-        });
+      if (attempts >= 12) {
+        return new Response(
+          JSON.stringify({ error: "Too many requests. Please wait an hour and try again." }),
+          { status: 429, headers: { "Content-Type": "application/json", ...corsHeaders } }
+        );
       }
       await env.KV.put(rateKey, attempts + 1, { expirationTtl: 3600 });
 
-      const formData = await request.formData();
+      // Safely parse form data
+      let formData;
+      try {
+        formData = await request.formData();
+      } catch (parseErr) {
+        throw new Error("Failed to read uploaded file. Please try a smaller file or different browser.");
+      }
+
+      if (!formData || typeof formData.get !== "function") {
+        throw new Error("Invalid upload data received");
+      }
+
       const file = formData.get("bill");
       const sessionId = formData.get("sessionId") || "";
 
       if (!file || !(file instanceof File)) {
-        throw new Error("No valid file uploaded");
+        throw new Error("No valid bill file uploaded");
+      }
+      if (file.size === 0) {
+        throw new Error("Uploaded file is empty");
       }
       if (file.size > 20 * 1024 * 1024) {
-        throw new Error("File too large (max 20MB)");
+        throw new Error("File too large – maximum 20MB");
       }
 
       const isPaid = await verifyStripe(sessionId, env);
 
       const buffer = await file.arrayBuffer();
-      const name = file.name.toLowerCase();
+      if (buffer.byteLength === 0) {
+        throw new Error("File content is empty");
+      }
 
+      const name = file.name?.toLowerCase() || "";
       let pages = [];
 
       if (name.endsWith(".pdf")) {
-        if (buffer.byteLength > 18 * 1024 * 1024) {
-          throw new Error("PDF too large – may have too many pages");
-        }
         pages = await ocrPdf(buffer, env);
       } else if (name.match(/\.(png|jpg|jpeg|webp)$/)) {
         const base64 = uint8ArrayToBase64(new Uint8Array(buffer));
         const enhanced = await enhanceImage(base64);
         pages = await ocrImage(enhanced, env);
       } else {
-        throw new Error("Unsupported file type. Please upload PDF or image (PNG/JPG/WEBP).");
+        throw new Error("Unsupported file type. Please upload PDF, PNG, JPG, or WEBP.");
       }
 
       const combinedText = pages.map(p => p.rawText).join("\n\n").trim();
@@ -115,16 +131,14 @@ export default {
 
       const merged = mergeAI(aiResult, lineItems);
 
-      // Everything above is in-memory only. Nothing is logged or stored.
-
       return new Response(
         JSON.stringify({
           isPaid,
           explanation:
             merged.explanation ||
             (ocrDetected
-              ? "We read your bill but could not generate a full explanation."
-              : "No readable text found. Try a clearer photo or PDF."),
+              ? "We read your bill successfully, but full AI explanation requires upgrade."
+              : "No readable text detected. Try a clearer scan or PDF."),
           structured: merged,
           rawTextPreview: ocrDetected ? combinedText.slice(0, 4000) : "",
           features: {
@@ -135,9 +149,15 @@ export default {
         { headers: { "Content-Type": "application/json", ...corsHeaders } }
       );
     } catch (err) {
+      // User-friendly error, no sensitive data leaked
       return new Response(
-        JSON.stringify({ error: err.message || "Processing failed. No data was retained." }),
-        { status: 500, headers: { "Content-Type": "application/json", ...corsHeaders } }
+        JSON.stringify({
+          error: err.message || "Processing failed. No data was saved.",
+        }),
+        {
+          status: 500,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        }
       );
     }
   },
@@ -159,7 +179,7 @@ async function verifyStripe(sessionId, env) {
   }
 }
 
-/* ================= OCR (IN-MEMORY ONLY) ================= */
+/* ================= OCR ================= */
 async function ocrImage(base64, env) {
   const res = await fetch(
     `https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
@@ -176,7 +196,7 @@ async function ocrImage(base64, env) {
   );
 
   const data = await res.json();
-  if (data.error) throw new Error("OCR failed – try a clearer image");
+  if (data.error) throw new Error("Image analysis failed");
 
   const annotation = data.responses?.[0]?.fullTextAnnotation;
   return [{
@@ -202,13 +222,13 @@ async function ocrPdf(buffer, env) {
     }
   );
 
-  const { name: operationName } = await startRes.json();
+  const startData = await startRes.json();
+  const operationName = startData.name;
   if (!operationName) throw new Error("Failed to start PDF processing");
 
-  // Poll with timeout (max ~90 seconds)
   const maxAttempts = 30;
   for (let i = 0; i < maxAttempts; i++) {
-    await new Promise(r => setTimeout(r, i < 5 ? 2000 : 4000)); // progressive delay
+    await new Promise(r => setTimeout(r, i < 5 ? 2000 : 4000));
 
     const poll = await fetch(
       `https://vision.googleapis.com/v1/${operationName}?key=${env.GOOGLE_VISION_API_KEY}`
@@ -216,7 +236,7 @@ async function ocrPdf(buffer, env) {
     const result = await poll.json();
 
     if (result.done) {
-      if (result.error) throw new Error("PDF OCR failed");
+      if (result.error) throw new Error("PDF processing failed");
       return (result.responses || []).map((r, i) => ({
         page: i + 1,
         rawText: r.fullTextAnnotation?.text || "",
@@ -224,43 +244,33 @@ async function ocrPdf(buffer, env) {
     }
   }
 
-  throw new Error("PDF processing timed out – file may be too large or complex");
+  throw new Error("PDF processing timed out. Try a smaller file.");
 }
 
-/* ================= AI ANALYSIS (IN-MEMORY ONLY) ================= */
+/* ================= AI ANALYSIS ================= */
 async function dualAIAnalysis(text, isPaid, env, ctx) {
-  const schema = {
-    summary: "string",
-    keyAmounts: {
-      totalCharges: "number|null",
-      insurancePaid: "number|null",
-      patientResponsibility: "number|null",
-    },
-    confidences: {
-      totalCharges: "number 0-1",
-      insurancePaid: "number 0-1",
-      patientResponsibility: "number 0-1",
-    },
-    explanation: "string",
-  };
-
-  const prompt = `Analyze this medical bill text and respond ONLY with valid JSON matching this exact schema:\n${JSON.stringify(schema)}\n\nText:\n"""${text}"""\n\nDo not add any extra text, markdown, or explanations.`;
+  const prompt = `Analyze this medical bill and respond ONLY with valid JSON matching this schema exactly:\n` +
+    JSON.stringify({
+      summary: "string",
+      keyAmounts: { totalCharges: "number|null", insurancePaid: "number|null", patientResponsibility: "number|null" },
+      confidences: { totalCharges: "number 0-1", insurancePaid: "number 0-1", patientResponsibility: "number 0-1" },
+      explanation: "string",
+    }) +
+    `\n\nText:\n"""${text}"""\n\nNo extra text or markdown.`;
 
   let openAI = null;
-  let gemini = null;
-
-  // For paid users: try both models. For free: just OpenAI (cheaper + sufficient)
   try {
     openAI = await openAIJson(prompt, env);
   } catch {}
 
+  let gemini = null;
   if (isPaid) {
     try {
       gemini = await geminiJson(prompt, env);
     } catch {}
   }
 
-  return { openAI, gemini };
+  return { openAI, gemini: isPaid ? gemini : null };
 }
 
 async function openAIJson(prompt, env) {
@@ -279,8 +289,7 @@ async function openAIJson(prompt, env) {
   });
 
   const data = await res.json();
-  const content = data.choices?.[0]?.message?.content || "";
-  return safeJson(content);
+  return safeJson(data.choices?.[0]?.message?.content || "");
 }
 
 async function geminiJson(prompt, env) {
@@ -297,11 +306,10 @@ async function geminiJson(prompt, env) {
   );
 
   const data = await res.json();
-  const content = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-  return safeJson(content);
+  return safeJson(data.candidates?.[0]?.content?.parts?.[0]?.text || "");
 }
 
-/* ================= MERGE & EXTRACT ================= */
+/* ================= MERGE & UTILS ================= */
 function mergeAI(ai, lineItems) {
   const a = ai?.openAI;
   const b = ai?.gemini;
@@ -315,7 +323,7 @@ function mergeAI(ai, lineItems) {
   };
 
   return {
-    summary: a?.summary || b?.summary || "Medical bill summary unavailable",
+    summary: a?.summary || b?.summary || "Medical bill analysis",
     explanation: a?.explanation || b?.explanation || "",
     keyAmounts: {
       totalCharges: pick("totalCharges"),
@@ -332,19 +340,16 @@ function mergeAI(ai, lineItems) {
 }
 
 function extractLineItems(text) {
-  const lines = text.split("\n");
-  const amountPattern = /\$[\d,]+(\.\d{2})?/g;
-
-  return lines
-    .filter(line => amountPattern.test(line))
+  return text
+    .split("\n")
+    .filter(line => /\$[\d,]+(\.\d{2})?/.test(line))
     .slice(0, 30)
     .map(line => ({
-      description: line.trim().replace(amountPattern, "").trim() || "Charge item",
+      description: line.replace(/\$[\d,]+(\.\d{2})?/, "").trim() || "Charge",
       rawLine: line.trim(),
     }));
 }
 
-/* ================= IMAGE ENHANCEMENT ================= */
 async function enhanceImage(base64) {
   try {
     const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
@@ -353,30 +358,28 @@ async function enhanceImage(base64) {
 
     const canvas = new OffscreenCanvas(img.width * scale, img.height * scale);
     const ctx = canvas.getContext("2d");
-    ctx.filter = "contrast(1.7) brightness(1.25) sharpen(1)";
+    ctx.filter = "contrast(1.7) brightness(1.25)";
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
     const blob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.93 });
     return uint8ArrayToBase64(new Uint8Array(await blob.arrayBuffer()));
   } catch {
-    return base64; // fallback
+    return base64;
   }
 }
 
-/* ================= UTILS ================= */
 function uint8ArrayToBase64(arr) {
   let binary = "";
-  const chunkSize = 0x8000;
-  for (let i = 0; i < arr.length; i += chunkSize) {
-    binary += String.fromCharCode(...arr.subarray(i, i + chunkSize));
+  const chunk = 0x8000;
+  for (let i = 0; i < arr.length; i += chunk) {
+    binary += String.fromCharCode(...arr.subarray(i, i + chunk));
   }
   return btoa(binary);
 }
 
 function safeJson(str) {
   try {
-    const cleaned = str.replace(/```json|```/g, "").trim();
-    return JSON.parse(cleaned);
+    return JSON.parse(str.replace(/```json|```/g, "").trim());
   } catch {
     return null;
   }

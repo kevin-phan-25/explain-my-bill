@@ -1,5 +1,8 @@
-// ExplainMyBill Worker – FULL PDF-to-Image + Dual AI + DEV BYPASS (Dec 29, 2025)
-// ✅ Updated for detailed logging and safer error handling
+// ExplainMyBill Worker – FULL PDF-to-Image + Dual AI + Gemini + DEV BYPASS (Dec 29, 2025)
+// ✅ Uses OpenAI + Gemini API for confidence scoring
+// ✅ Supports PDFs, images, Excel files
+// ✅ DEV BYPASS enabled
+// ✅ Full logging and error handling
 
 export default {
   async fetch(request, env) {
@@ -25,7 +28,7 @@ export default {
         return await handleBillProcessing(request, env, cors);
       }
 
-      // Root Page
+      // Root page
       return new Response(`
 <!DOCTYPE html>
 <html lang="en">
@@ -115,7 +118,7 @@ async function handleBillProcessing(request, env, cors) {
     if (!file || file.size === 0) return errorResponse("No file uploaded", 400, cors);
     if (file.size > 20 * 1024 * 1024) return errorResponse("File exceeds 20MB", 413, cors);
 
-    const name = file.name.toLowerCase();
+    const name = (file.name || "").toLowerCase();
     const allowed = [".pdf", ".png", ".jpg", ".jpeg", ".xlsx", ".xls"];
     if (!allowed.some(e => name.endsWith(e))) {
       return errorResponse("Unsupported format", 415, cors);
@@ -123,7 +126,6 @@ async function handleBillProcessing(request, env, cors) {
 
     let isPaid = false;
 
-    // 🔓 DEV MODE OVERRIDE
     if (devBypass) {
       isPaid = true;
       console.log("DEV BYPASS ENABLED: isPaid forced true");
@@ -181,30 +183,17 @@ async function handleBillProcessing(request, env, cors) {
 
     console.log("Extracted amounts:", { totalCharges, insurancePaid, patientDue });
 
-    const aiResult = await analyzeWithAI(text, isPaid, env);
+    // ==================== Dual AI: OpenAI + Gemini ====================
+    const openAIResult = await analyzeWithOpenAI(text, isPaid, env);
+    const geminiResult = await analyzeWithGemini(text, isPaid, env);
 
-    const finalResult = {
-      summary: aiResult?.summary || "Your bill was analyzed.",
-      summaryPoints: aiResult?.summaryPoints || [],
-      keyAmounts: {
-        totalCharges: aiResult?.keyAmounts?.totalCharges || totalCharges || "Not detected",
-        insurancePaid: aiResult?.keyAmounts?.insurancePaid || insurancePaid || "Not detected",
-        patientResponsibility: aiResult?.keyAmounts?.patientResponsibility || patientDue || "Not detected",
-      },
-      services: aiResult?.services || [],
-      redFlags: aiResult?.redFlags || [],
-      potentialSavings: isPaid ? aiResult?.potentialSavings || null : null,
-      explanation: aiResult?.explanation || "Bill analyzed successfully.",
-      nextSteps: aiResult?.nextSteps || [],
-    };
-
-    console.log("Final structured result ready");
+    const mergedResult = mergeAIResults(openAIResult, geminiResult);
 
     return new Response(JSON.stringify({
       isPaid,
       devBypass,
-      pages: [{ page: 1, rawText: text, structured: finalResult }],
-      explanation: finalResult.explanation,
+      pages: [{ page: 1, rawText: text, structured: mergedResult }],
+      explanation: mergedResult.explanation,
     }), {
       headers: { "Content-Type": "application/json", ...cors },
     });
@@ -215,7 +204,64 @@ async function handleBillProcessing(request, env, cors) {
   }
 }
 
-// ======================== PDF-to-Image OCR ========================
+// ======================== Dual AI Helpers ========================
+async function analyzeWithOpenAI(text, isPaid, env) {
+  try {
+    const model = isPaid ? "gpt-4o" : "gpt-4o-mini";
+    const prompt = `Analyze this bill text and return JSON only:\n"""${text}"""`;
+
+    const res = await fetchWithTimeout("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], temperature: 0 }),
+    });
+
+    const data = await res.json();
+    return parseResponse(data);
+  } catch (err) {
+    console.warn("OpenAI analysis failed:", err);
+    return null;
+  }
+}
+
+async function analyzeWithGemini(text, isPaid, env) {
+  try {
+    const model = isPaid ? "gemini-1" : "gemini-1-mini";
+    const prompt = `Analyze this bill text and return JSON with confidence scores:\n"""${text}"""`;
+
+    const res = await fetchWithTimeout("https://api.gemini.com/v1/completions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.GEMINI_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model, prompt, temperature: 0 }),
+    });
+
+    const data = await res.json();
+    return data.output ? JSON.parse(data.output) : null;
+  } catch (err) {
+    console.warn("Gemini analysis failed:", err);
+    return null;
+  }
+}
+
+function mergeAIResults(openAIResult, geminiResult) {
+  return {
+    summary: openAIResult?.summary || geminiResult?.summary || "Your bill was analyzed.",
+    summaryPoints: openAIResult?.summaryPoints || geminiResult?.summaryPoints || [],
+    keyAmounts: {
+      totalCharges: openAIResult?.keyAmounts?.totalCharges || geminiResult?.keyAmounts?.totalCharges || "Not detected",
+      insurancePaid: openAIResult?.keyAmounts?.insurancePaid || geminiResult?.keyAmounts?.insurancePaid || "Not detected",
+      patientResponsibility: openAIResult?.keyAmounts?.patientResponsibility || geminiResult?.keyAmounts?.patientResponsibility || "Not detected",
+      confidence: geminiResult?.keyAmounts?.confidence || null
+    },
+    services: openAIResult?.services || geminiResult?.services || [],
+    redFlags: openAIResult?.redFlags || geminiResult?.redFlags || [],
+    potentialSavings: openAIResult?.potentialSavings || geminiResult?.potentialSavings || null,
+    explanation: openAIResult?.explanation || geminiResult?.explanation || "Bill analyzed successfully.",
+    nextSteps: openAIResult?.nextSteps || geminiResult?.nextSteps || [],
+  };
+}
+
+// ======================== OCR / PDF / Excel ========================
 async function extractTextFromPDFasImages(u8, env) {
   try {
     const pdfjs = await import("https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.222/es5/build/pdf.js");
@@ -230,11 +276,7 @@ async function extractTextFromPDFasImages(u8, env) {
       await page.render({ canvasContext: ctx, viewport }).promise;
 
       const blob = await canvas.convertToBlob({ type: "image/png" });
-      const pageText = await extractWithGoogleVision(
-        new Uint8Array(await blob.arrayBuffer()),
-        "image/png",
-        env
-      );
+      const pageText = await extractWithGoogleVision(new Uint8Array(await blob.arrayBuffer()), "image/png", env);
       fullText += pageText + "\n\n";
     }
 
@@ -245,67 +287,16 @@ async function extractTextFromPDFasImages(u8, env) {
   }
 }
 
-// ======================== Helpers ========================
-function errorResponse(msg, status, cors) {
-  return new Response(JSON.stringify({
-    error: msg,
-    pages: [{ rawText: msg }],
-  }), {
-    status,
-    headers: { "Content-Type": "application/json", ...cors },
-  });
-}
-
-function extractAmount(text, patterns) {
-  for (const p of patterns) {
-    const m = text.match(p);
-    if (m) return "$" + m[1];
-  }
-  return null;
-}
-
-async function analyzeWithAI(text, isPaid, env) {
-  try {
-    const model = isPaid ? "gpt-4o" : "gpt-4o-mini";
-    const prompt = `Analyze this bill text and return JSON only:\n"""${text}"""`;
-
-    const res = await fetchWithTimeout("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0,
-      }),
-    });
-
-    const data = await res.json();
-    return parseResponse(data);
-  } catch (err) {
-    console.warn("AI analysis failed:", err);
-    return null;
-  }
-}
-
 async function extractWithGoogleVision(uint8, mimeType, env) {
   const base64 = uint8ArrayToBase64(uint8);
   try {
-    const res = await fetchWithTimeout(
-      `https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          requests: [{
-            image: { content: base64 },
-            features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
-          }],
-        }),
-      }
-    );
+    const res = await fetchWithTimeout(`https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        requests: [{ image: { content: base64 }, features: [{ type: "DOCUMENT_TEXT_DETECTION" }] }],
+      }),
+    });
     const data = await res.json();
     return data.responses?.[0]?.fullTextAnnotation?.text || "";
   } catch (err) {
@@ -319,14 +310,8 @@ async function extractWithOcrSpace(uint8, mimeType, env) {
   try {
     const res = await fetch("https://api.ocr.space/parse/image", {
       method: "POST",
-      headers: {
-        apikey: env.OCR_SPACE_API_KEY,
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams({
-        base64Image: `data:${mimeType};base64,${base64}`,
-        language: "eng",
-      }),
+      headers: { apikey: env.OCR_SPACE_API_KEY, "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ base64Image: `data:${mimeType};base64,${base64}`, language: "eng" }),
     });
     const json = await res.json();
     return json.ParsedResults?.[0]?.ParsedText || "";
@@ -336,6 +321,21 @@ async function extractWithOcrSpace(uint8, mimeType, env) {
   }
 }
 
+async function processExcel(buffer) {
+  try {
+    const XLSX = await import("https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm");
+    const wb = XLSX.read(new Uint8Array(buffer), { type: "array" });
+    return wb.SheetNames.map((name, i) => ({
+      page: i + 1,
+      rawText: XLSX.utils.sheet_to_csv(wb.Sheets[name]) || "",
+    }));
+  } catch (err) {
+    console.error("Excel failed:", err);
+    return [{ page: 1, rawText: "Could not read Excel file." }];
+  }
+}
+
+// ======================== Helpers ========================
 function uint8ArrayToBase64(uint8) {
   let s = "";
   for (let i = 0; i < uint8.length; i += 0x8000) {
@@ -354,6 +354,13 @@ function parseResponse(data) {
   }
 }
 
+function errorResponse(msg, status, cors) {
+  return new Response(JSON.stringify({ error: msg, pages: [{ rawText: msg }] }), {
+    status,
+    headers: { "Content-Type": "application/json", ...cors },
+  });
+}
+
 async function fetchWithTimeout(url, opts = {}, timeout = 15000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
@@ -364,16 +371,10 @@ async function fetchWithTimeout(url, opts = {}, timeout = 15000) {
   }
 }
 
-async function processExcel(buffer) {
-  try {
-    const XLSX = await import("https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm");
-    const wb = XLSX.read(new Uint8Array(buffer), { type: "array" });
-    return wb.SheetNames.map((name, i) => ({
-      page: i + 1,
-      rawText: XLSX.utils.sheet_to_csv(wb.Sheets[name]) || "",
-    }));
-  } catch (err) {
-    console.error("Excel failed:", err);
-    return [{ page: 1, rawText: "Could not read Excel file." }];
+function extractAmount(text, patterns) {
+  for (const p of patterns) {
+    const m = text.match(p);
+    if (m) return "$" + m[1];
   }
+  return null;
 }

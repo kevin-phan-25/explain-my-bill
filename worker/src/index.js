@@ -180,7 +180,7 @@ export default {
           /please\s*pay\s*this\s*amount[\s:]*\$?([\d.,]+)/i,
         ]);
 
-        // DUAL AI
+        // DUAL AI — FIXED GEMINI ENDPOINT (Dec 2025)
         let aiResult = null;
         try {
           const openModel = isPaid ? "gpt-4o" : "gpt-4o-mini";
@@ -210,10 +210,13 @@ Use null if unsure.`;
               headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
               body: JSON.stringify({ model: openModel, messages: [{ role: "user", content: prompt }], temperature: 0, max_tokens: 600 }),
             }),
-            fetchWithTimeout(`https://generativelanguage.googleapis.com/v1beta/models/${gemModel}:generateContent?key=${env.GEMINI_API_KEY}`, {
+            fetchWithTimeout(`https://generativelanguage.googleapis.com/v1/models/${gemModel}:generateContent?key=${env.GEMINI_API_KEY}`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: { temperature: 0, maxOutputTokens: 600 } }),
+              body: JSON.stringify({
+                contents: [{ role: "user", parts: [{ text: prompt }] }],
+                generationConfig: { temperature: 0, maxOutputTokens: 600 },
+              }),
             }),
           ]);
 

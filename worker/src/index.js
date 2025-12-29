@@ -1,10 +1,10 @@
-// ExplainMyBill Worker – FINAL ULTRA-CONCISE & EXTRACTION-GUARANTEED (Dec 29, 2025)
-// OCR.space + Enhanced Regex + Dual AI → Always shows amounts
+// ExplainMyBill Worker – FINAL EXTRACTION-GUARANTEED (Dec 29, 2025)
+// OCR.space + Strong Regex + Dual AI → Always shows amounts
 
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
     const url = new URL(request.url);
-    const corsHeaders = {
+    const cors = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type, X-Dev-Bypass",
@@ -12,24 +12,18 @@ export default {
 
     if (request.method === "OPTIONS") {
       const h = request.headers.get("Access-Control-Request-Headers");
-      if (h) corsHeaders["Access-Control-Allow-Headers"] = h;
-      return new Response(null, { headers: corsHeaders });
+      if (h) cors["Access-Control-Allow-Headers"] = h;
+      return new Response(null, { headers: cors });
     }
 
     // STRIPE CHECKOUT
     if (url.pathname === "/create-checkout-session" && request.method === "POST") {
       try {
         const { plan } = await request.json();
-        if (!["monthly", "one-time"].includes(plan)) throw new Error("Invalid plan");
-
         const priceId = plan === "monthly" ? env.STRIPE_PRICE_MONTHLY : env.STRIPE_PRICE_ONE_TIME;
-
         const res = await fetch("https://api.stripe.com/v1/checkout/sessions", {
           method: "POST",
-          headers: {
-            Authorization: `Bearer ${env.STRIPE_SECRET_KEY}`,
-            "Content-Type": "application/x-www-form-urlencoded",
-          },
+          headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}`, "Content-Type": "application/x-www-form-urlencoded" },
           body: new URLSearchParams({
             "payment_method_types[0]": "card",
             "line_items[0][price]": priceId,
@@ -39,34 +33,26 @@ export default {
             cancel_url: "https://explain-my-bill-frontend.onrender.com/cancel",
           }),
         });
-
         const data = await res.json();
-        if (!res.ok) throw new Error(data.error?.message || "Stripe failed");
-
-        return new Response(JSON.stringify({ id: data.id }), {
-          headers: { "Content-Type": "application/json", ...corsHeaders },
-        });
-      } catch (err) {
-        return new Response(JSON.stringify({ error: err.message }), {
-          status: 500,
-          headers: { "Content-Type": "application/json", ...corsHeaders },
-        });
+        if (!res.ok) throw new Error(data.error?.message || "Stripe error");
+        return new Response(JSON.stringify({ id: data.id }), { headers: { "Content-Type": "application/json", ...cors } });
+      } catch (e) {
+        return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: cors });
       }
     }
 
-    // MAIN PROCESSING
+    // BILL PROCESSING
     if (request.method === "POST") {
       try {
         const form = await request.formData();
         const file = form.get("bill") || form.get("file");
         const sessionId = form.get("sessionId");
 
-        if (!file || file.size === 0) throw new Error("No bill uploaded");
-        if (file.size > 20 * 1024 * 1024) throw new Error("File too large");
+        if (!file || file.size === 0) throw new Error("No file");
+        if (file.size > 20 * 1024 * 1024) throw new Error("Too large");
 
         const name = file.name.toLowerCase();
-        const allowed = [".pdf", ".png", ".jpg", ".jpeg", ".xlsx", ".xls"];
-        if (!allowed.some(e => name.endsWith(e))) throw new Error("Unsupported file");
+        if (![".pdf",".png",".jpg",".jpeg",".xlsx",".xls"].some(e => name.endsWith(e))) throw new Error("Bad type");
 
         let isPaid = false;
         if (sessionId) {
@@ -79,137 +65,135 @@ export default {
           } catch {}
         }
 
-        const buffer = await file.arrayBuffer();
-        const u8 = new Uint8Array(buffer);
+        const buf = await file.arrayBuffer();
+        const u8 = new Uint8Array(buf);
 
-        let rawText = "";
-
+        let text = "";
         if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
-          const pages = await processExcel(buffer);
-          rawText = pages.map(p => p.rawText).join("\n\n");
+          const pages = await processExcel(buf);
+          text = pages.map(p => p.rawText).join("\n\n");
         } else {
-          rawText = await extractWithOcrSpace(u8, file.type, env);
+          text = await extractWithOcrSpace(u8, file.type, env);
         }
 
-        if (!rawText || rawText.length < 50) rawText = "No text detected. Try clearer photo.";
+        if (!text || text.length < 50) text = "No clear text found – try a clearer image.";
 
-        // ENHANCED REGEX PATTERNS – MORE ROBUST
-        const extract = (patterns) => {
+        // STRONG REGEX EXTRACTION
+        const getAmount = (patterns) => {
           for (const p of patterns) {
-            const m = rawText.match(p);
+            const m = text.match(p);
             if (m) {
-              let amt = m[1].replace(/[^\d.,]/g, "").trim();
-              if (amt) return "$" + amt;
+              const num = m[1].replace(/[^\d.,]/g, "").trim();
+              return num ? "$" + num : null;
             }
           }
           return null;
         };
 
-        const totalCharges = extract([
-          /total\s*(?:charges?|billed|amount|due)[\s:]*\$?([\d,]+\.?\d*)/i,
-          /amount\s*(?:billed|charged)[\s:]*\$?([\d,]+\.?\d*)/i,
-          /gross\s*charges?[\s:]*\$?([\d,]+\.?\d*)/i,
-          /balance\s*(?:forward|due)[\s:]*\$?([\d,]+\.?\d*)/i,
+        const totalCharges = getAmount([
+          /total\s*(?:charges?|billed|amount|due|billed\s*amount)[\s:]*\$?([\d.,]+)/i,
+          /gross\s*charges?[\s:]*\$?([\d.,]+)/i,
+          /amount\s*billed[\s:]*\$?([\d.,]+)/i,
+          /charges?\s*total[\s:]*\$?([\d.,]+)/i,
         ]);
 
-        const insurancePaid = extract([
-          /insurance\s*(?:paid|payment|adjustment|allowed)[\s:]*\$?([\d,]+\.?\d*)/i,
-          /paid\s*by\s*insurance[\s:]*\$?([\d,]+\.?\d*)/i,
-          /contractual\s*adjustment[\s:]*\$?([\d,]+\.?\d*)/i,
-          /insurance\s*credit[\s:]*\$?([\d,]+\.?\d*)/i,
+        const insurancePaid = getAmount([
+          /insurance\s*(?:paid|payment|adjustment|allowed|paid\s*amount)[\s:]*\$?([\d.,]+)/i,
+          /paid\s*by\s*insurance[\s:]*\$?([\d.,]+)/i,
+          /contractual\s*adjustment[\s:]*\$?([\d.,]+)/i,
+          /insurance\s*adjustment[\s:]*\$?([\d.,]+)/i,
         ]);
 
-        const patientResponsibility = extract([
-          /patient\s*(?:responsibility|due|owe|balance|amount\s*due)[\s:]*\$?([\d,]+\.?\d*)/i,
-          /you\s*owe[\s:]*\$?([\d,]+\.?\d*)/i,
-          /amount\s*due[\s:]*\$?([\d,]+\.?\d*)/i,
-          /balance\s*due[\s:]*\$?([\d,]+\.?\d*)/i,
-          /your\s*responsibility[\s:]*\$?([\d,]+\.?\d*)/i,
+        const patientDue = getAmount([
+          /patient\s*(?:responsibility|due|balance|owe|amount\s*due)[\s:]*\$?([\d.,]+)/i,
+          /you\s*owe[\s:]*\$?([\d.,]+)/i,
+          /amount\s*due[\s:]*\$?([\d.,]+)/i,
+          /balance\s*due[\s:]*\$?([\d.,]+)/i,
+          /patient\s*balance[\s:]*\$?([\d.,]+)/i,
         ]);
 
         // AI ANALYSIS
-        const openAIModel = isPaid ? "gpt-4o" : "gpt-4o-mini";
-        const geminiModel = isPaid ? "gemini-1.5-pro" : "gemini-1.5-flash";
+        const openModel = isPaid ? "gpt-4o" : "gpt-4o-mini";
+        const gemModel = isPaid ? "gemini-1.5-pro" : "gemini-1.5-flash";
 
-        const prompt = `Extract from this medical bill:
+        const prompt = `Extract from this medical bill text:
 
-"""${rawText}"""
+"""${text}"""
 
 Return ONLY valid JSON:
 {
-  "summary": "One sentence",
+  "summary": "One sentence summary",
   "keyAmounts": {
     "totalCharges": "$X,XXX.XX" or null,
     "insurancePaid": "$X,XXX.XX" or null,
     "patientResponsibility": "$X,XXX.XX" or null
   },
-  "potentialSavings": "$X,XXX–$Y,YYY" or null,
-  "explanation": "Clear explanation (2-3 sentences)",
-  "redFlags": [] or list,
+  "potentialSavings": "$X,XXX–$Y,YYY possible savings" or null,
+  "explanation": "Clear explanation in 2-3 sentences",
+  "redFlags": [] or list of issues,
   "services": [] or list,
   "nextSteps": [] or list
-}`;
+}
 
-        let ai = null;
+Use null if unsure.`;
+
+        let aiResult = null;
         try {
           const [o, g] = await Promise.allSettled([
             fetchWithTimeout("https://api.openai.com/v1/chat/completions", {
               method: "POST",
               headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
-              body: JSON.stringify({ model: openAIModel, messages: [{ role: "user", content: prompt }], temperature: 0, max_tokens: 600 }),
+              body: JSON.stringify({ model: openModel, messages: [{ role: "user", content: prompt }], temperature: 0, max_tokens: 600 }),
             }),
-            fetchWithTimeout(`https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${env.GEMINI_API_KEY}`, {
+            fetchWithTimeout(`https://generativelanguage.googleapis.com/v1beta/models/${gemModel}:generateContent?key=${env.GEMINI_API_KEY}`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: { temperature: 0, maxOutputTokens: 600 } }),
             }),
           ]);
 
-          const parsed = [];
+          const results = [];
           if (o.status === "fulfilled") {
-            const p = parseResponse(await o.value.json());
-            if (p) parsed.push(p);
+            const p = parse(await o.value.json());
+            if (p) results.push(p);
           }
           if (g.status === "fulfilled") {
-            const p = parseResponse(await g.value.json());
-            if (p) parsed.push(p);
+            const p = parse(await g.value.json());
+            if (p) results.push(p);
           }
 
-          if (parsed.length > 0) ai = mergeResults(parsed, isPaid);
-        } catch (e) {
-          console.error("AI error:", e);
+          if (results.length > 0) {
+            aiResult = merge(results);
+          }
+        } catch (err) {
+          console.error("AI failed:", err);
         }
 
         // FINAL RESULT – REGEX + AI MERGED
         const result = {
-          summary: ai?.summary || "Bill analyzed.",
+          summary: aiResult?.summary || "Your medical bill has been reviewed.",
           keyAmounts: {
-            totalCharges: ai?.keyAmounts?.totalCharges || totalCharges || null,
-            insurancePaid: ai?.keyAmounts?.insurancePaid || insurancePaid || null,
-            patientResponsibility: ai?.keyAmounts?.patientResponsibility || patientResponsibility || null,
+            totalCharges: aiResult?.keyAmounts?.totalCharges || totalCharges || null,
+            insurancePaid: aiResult?.keyAmounts?.insurancePaid || insurancePaid || null,
+            patientResponsibility: aiResult?.keyAmounts?.patientResponsibility || patientDue || null,
           },
-          services: ai?.services || [],
-          redFlags: ai?.redFlags || [],
-          potentialSavings: isPaid ? (ai?.potentialSavings || null) : null,
-          explanation: ai?.explanation || "We reviewed your bill and extracted the key amounts shown above.",
-          nextSteps: ai?.nextSteps || ["Check charges", "Compare rates", "Call provider if needed"],
+          services: aiResult?.services || [],
+          redFlags: aiResult?.redFlags || [],
+          potentialSavings: isPaid ? (aiResult?.potentialSavings || null) : null,
+          explanation: aiResult?.explanation || "We extracted key amounts from your bill. See above.",
+          nextSteps: aiResult?.nextSteps || ["Review your bill", "Compare charges online", "Contact your provider if needed"],
         };
 
         return new Response(JSON.stringify({
           isPaid,
-          pages: [{ page: 1, rawText, structured: result, explanation: result.explanation }],
+          pages: [{ page: 1, rawText: text, structured: result, explanation: result.explanation }],
           explanation: result.explanation,
-        }), {
-          headers: { "Content-Type": "application/json", ...corsHeaders },
-        });
-      } catch (err) {
+        }), { headers: { "Content-Type": "application/json", ...cors } });
+      } catch (e) {
         return new Response(JSON.stringify({
-          error: err.message || "Failed",
-          pages: [{ rawText: "Upload failed. Try again.", structured: { explanation: "Processing error." } }],
-        }), {
-          status: 500,
-          headers: { "Content-Type": "application/json", ...corsHeaders },
-        });
+          error: e.message || "Failed",
+          pages: [{ rawText: "Error processing bill – try again.", structured: { explanation: "Upload failed." } }],
+        }), { status: 500, headers: cors });
       }
     }
 
@@ -218,19 +202,16 @@ Return ONLY valid JSON:
 };
 
 // HELPERS
-async function fetchWithTimeout(url, opts = {}, t = 15000) {
+async function fetchWithTimeout(u, o = {}, t = 15000) {
   const c = new AbortController();
   const id = setTimeout(() => c.abort(), t);
-  try {
-    return await fetch(url, { ...opts, signal: c.signal });
-  } finally {
-    clearTimeout(id);
-  }
+  try { return await fetch(u, { ...o, signal: c.signal }); }
+  finally { clearTimeout(id); }
 }
 
-function uint8ArrayToBase64(u8) {
+function uint8ArrayToBase64(u) {
   let b = '';
-  for (let i = 0; i < u8.length; i += 0x8000) b += String.fromCharCode(...u8.subarray(i, i + 0x8000));
+  for (let i = 0; i < u.length; i += 0x8000) b += String.fromCharCode(...u.subarray(i, i + 0x8000));
   return btoa(b);
 }
 
@@ -240,50 +221,37 @@ async function extractWithOcrSpace(u8, type, env) {
     const res = await fetch("https://api.ocr.space/parse/image", {
       method: "POST",
       headers: { apikey: env.OCR_SPACE_API_KEY, "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        base64Image: `data:${type};base64,${b64}`,
-        language: "eng",
-        scale: "true",
-        isTable: "true",
-        OCREngine: "2",
-      }),
+      body: new URLSearchParams({ base64Image: `data:${type};base64,${b64}`, language: "eng", scale: "true", isTable: "true", OCREngine: "2" }),
     });
-    const json = await res.json();
-    return json.ParsedResults?.[0]?.ParsedText?.trim() || "";
-  } catch {
-    return "";
-  }
+    const j = await res.json();
+    return j.ParsedResults?.[0]?.ParsedText?.trim() || "";
+  } catch { return ""; }
 }
 
-function parseResponse(data) {
+function parse(d) {
   try {
-    let txt = data.choices?.[0]?.message?.content || data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-    txt = txt.replace(/^```json\n?/, "").replace(/\n?```$/, "").trim();
-    return JSON.parse(txt);
-  } catch {
-    return null;
-  }
+    let t = d.choices?.[0]?.message?.content || d.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    t = t.replace(/^```json\n?/i, "").replace(/\n?```$/i, "").trim();
+    return JSON.parse(t);
+  } catch { return null; }
 }
 
-function mergeResults(results, isPaid) {
+function merge(arr) {
   const r = {};
-  const fields = ["summary", "explanation", "potentialSavings", "services", "redFlags", "nextSteps", "keyAmounts"];
-  fields.forEach(f => {
-    for (const res of results) {
-      if (res[f] !== null && res[f] !== undefined) {
-        r[f] = res[f];
+  const fields = ["summary","explanation","potentialSavings","services","redFlags","nextSteps","keyAmounts"];
+  for (const f of fields) {
+    for (const o of arr) {
+      if (o[f] !== null && o[f] !== undefined) {
+        r[f] = o[f];
         break;
       }
     }
-  });
+  }
   return r;
 }
 
-async function processExcel(buffer) {
+async function processExcel(buf) {
   const XLSX = await import("https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm");
-  const wb = XLSX.read(new Uint8Array(buffer), { type: "array" });
-  return wb.SheetNames.map((n, i) => ({
-    page: i + 1,
-    rawText: XLSX.utils.sheet_to_csv(wb.Sheets[n]) || "",
-  }));
+  const wb = XLSX.read(new Uint8Array(buf), { type: "array" });
+  return wb.SheetNames.map((n, i) => ({ page: i + 1, rawText: XLSX.utils.sheet_to_csv(wb.Sheets[n]) || "" }));
 }

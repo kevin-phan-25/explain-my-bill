@@ -1,6 +1,6 @@
 // ExplainMyBill Worker – FINAL PRODUCTION-READY (Dec 29, 2025)
-// Google Vision primary • OCR.space fallback • Dual AI • Ultra-robust regex for medical + utility bills
-// In-memory only • No data retained • Paid features: savings estimates, red flags, detailed steps
+// Primary: Google Vision OCR • Fallback: OCR.space • Dual AI with confidence merge
+// Supports: Medical, Utility, Credit Card bills • In-memory only • Privacy-first
 
 export default {
   async fetch(request, env) {
@@ -17,7 +17,7 @@ export default {
       return new Response(null, { headers: cors });
     }
 
-    // STRIPE CHECKOUT – Supports one-time, monthly, lifetime
+    // STRIPE CHECKOUT
     if (url.pathname === "/create-checkout-session" && request.method === "POST") {
       try {
         const { plan } = await request.json().catch(() => ({}));
@@ -124,29 +124,31 @@ export default {
         const buf = await file.arrayBuffer();
         const u8 = new Uint8Array(buf);
 
-        // TEXT EXTRACTION
+        // PRIMARY OCR: Google Vision (best accuracy)
         try {
           if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
             const pages = await processExcel(buf);
             text = pages.map(p => p.rawText).join("\n\n");
-          } else {
-            if (env.GOOGLE_VISION_API_KEY) {
-              text = await extractWithGoogleVision(u8, file.type, env);
-            }
-            if (!text || text.length < 100) {
-              text = await extractWithOcrSpace(u8, file.type, env);
-            }
+          } else if (env.GOOGLE_VISION_API_KEY) {
+            text = await extractWithGoogleVision(u8, file.type, env);
+            console.log("Google Vision extracted:", text.length, "characters");
+          }
+
+          // Fallback OCR.space only if Vision failed or returned little text
+          if (!text || text.length < 100) {
+            console.log("Falling back to OCR.space");
+            text = await extractWithOcrSpace(u8, file.type, env);
           }
         } catch (err) {
-          console.error("OCR failed:", err);
-          text = "We couldn't read your bill clearly. Try a better photo.";
+          console.error("All OCR failed:", err);
+          text = "We couldn't read your bill. Try a clear, well-lit photo of the summary page.";
         }
 
         if (!text || text.length < 50) {
-          text = "No text detected. Try a clear, well-lit photo of the summary page.";
+          text = "No readable text found. Use a straight-on photo of the summary page.";
         }
 
-        // ULTRA-ROBUST REGEX – medical + utility bills (electric, gas, water, internet, cable)
+        // ROBUST REGEX – medical, utility, credit card
         const getAmount = (patterns) => {
           for (const p of patterns) {
             const m = text.match(p);
@@ -160,80 +162,63 @@ export default {
         };
 
         const totalCharges = getAmount([
-          /total\s*(?:charges?|billed|amount|due|balance|cost|fees?|bill|owed|usage|service)[\s:]*\$?([\d.,]+)/i,
+          /total\s*(?:charges?|billed|amount|due|balance|cost|fees?|bill|owed|usage|statement)[\s:]*\$?([\d.,]+)/i,
           /amount\s*(?:billed|charged|due|total|owed|payable|current)[\s:]*\$?([\d.,]+)/i,
-          /gross\s*charges?[\s:]*\$?([\d.,]+)/i,
-          /subtotal[\s:]*\$?([\d.,]+)/i,
-          /statement\s*balance[\s:]*\$?([\d.,]+)/i,
-          /balance\s*forward[\s:]*\$?([\d.,]+)/i,
-          /previous\s*balance[\s:]*\$?([\d.,]+)/i,
-          /new\s*charges?[\s:]*\$?([\d.,]+)/i,
-          /total\s*due[\s:]*\$?([\d.,]+)/i,
           /current\s*charges?[\s:]*\$?([\d.,]+)/i,
-          /service\s*period\s*total[\s:]*\$?([\d.,]+)/i,
-          /billing\s*period\s*total[\s:]*\$?([\d.,]+)/i,
+          /new\s*charges?[\s:]*\$?([\d.,]+)/i,
+          /balance\s*due[\s:]*\$?([\d.,]+)/i,
+          /total\s*due[\s:]*\$?([\d.,]+)/i,
         ]);
 
         const insurancePaid = getAmount([
-          /insurance\s*(?:paid|payment|adjustment|allowed|credit|reimbursement|benefit|discount)[\s:]*\$?([\d.,]+)/i,
+          /insurance\s*(?:paid|payment|adjustment|allowed|credit|reimbursement|benefit)[\s:]*\$?([\d.,]+)/i,
           /paid\s*by\s*insurance[\s:]*\$?([\d.,]+)/i,
           /contractual\s*(?:adjustment|write.?off|discount|savings)[\s:]*\$?([\d.,]+)/i,
-          /insurance\s*adjustment[\s:]*\$?([\d.,]+)/i,
-          /allowed\s*amount[\s:]*\$?([\d.,]+)/i,
-          /plan\s*paid[\s:]*\$?([\d.,]+)/i,
           /payments?[\s:]*\$?([\d.,]+)/i,
           /credits?[\s:]*\$?([\d.,]+)/i,
-          /previous\s*credit[\s:]*\$?([\d.,]+)/i,
         ]);
 
         const patientDue = getAmount([
-          /patient\s*(?:responsibility|due|balance|owe|amount\s*due|portion|liability|share|balance\s*due)[\s:]*\$?([\d.,]+)/i,
+          /patient\s*(?:responsibility|due|balance|owe|amount\s*due|portion|liability|share)[\s:]*\$?([\d.,]+)/i,
           /you\s*owe[\s:]*\$?([\d.,]+)/i,
           /amount\s*due[\s:]*\$?([\d.,]+)/i,
           /balance\s*due[\s:]*\$?([\d.,]+)/i,
-          /patient\s*balance[\s:]*\$?([\d.,]+)/i,
-          /your\s*responsibility[\s:]*\$?([\d.,]+)/i,
           /current\s*amount\s*due[\s:]*\$?([\d.,]+)/i,
-          /please\s*pay\s*this\s*amount[\s:]*\$?([\d.,]+)/i,
+          /please\s*pay[\s:]*\$?([\d.,]+)/i,
           /minimum\s*payment[\s:]*\$?([\d.,]+)/i,
-          /due\s*now[\s:]*\$?([\d.,]+)/i,
           /payment\s*due[\s:]*\$?([\d.,]+)/i,
           /total\s*amount\s*due[\s:]*\$?([\d.,]+)/i,
-          /pay\s*by[\s:]*\$?([\d.,]+)/i,
         ]);
 
-        // DUAL AI ANALYSIS
+        // DUAL AI – with confidence merging
         let aiResult = null;
         try {
           const openModel = isPaid ? "gpt-4o" : "gpt-4o-mini";
           const gemModel = isPaid ? "gemini-1.5-pro" : "gemini-1.5-flash";
 
-          const prompt = `You are an expert bill analyst helping users understand any type of bill (medical, utility, credit card, etc.) in plain English.
+          const prompt = `You are an expert bill analyst. Analyze this extracted text from any type of bill (medical, utility, credit card, etc.).
 
-Analyze this extracted bill text:
+Text:
 """${text}"""
 
 Return ONLY valid JSON:
 {
-  "summary": "One clear sentence summarizing the bill",
-  "summaryPoints": [
-    "Key insight #1",
-    "Key insight #2",
-    "Key insight #3 (optional)"
-  ],
+  "confidence": 0.0 to 1.0 (how sure you are about the extraction),
+  "summary": "One sentence summary",
+  "summaryPoints": ["Key insight 1", "Key insight 2"],
   "keyAmounts": {
-    "totalCharges": "Extracted total billed amount as string with $ or null",
-    "insurancePaid": "Amount paid by insurance or credits as string with $ or null",
-    "patientResponsibility": "Final amount owed as string with $ or null"
+    "totalCharges": "$X,XXX.XX" or null,
+    "insurancePaid": "$X,XXX.XX" or null,
+    "patientResponsibility": "$X,XXX.XX" or null
   },
-  "services": ["Short list of main items/services or null"],
-  "redFlags": ["Potential issues, errors, or overcharges (empty array if none)"],
-  "potentialSavings": "Estimated savings range (e.g. '$50–$200') or null",
-  "explanation": "Clear, calm explanation in 2-4 short paragraphs breaking down the bill lingo",
-  "nextSteps": ["Ranked actionable steps to understand or dispute the bill"]
+  "services": ["List of main items or null"],
+  "redFlags": ["Potential errors, overcharges, or disputes"],
+  "potentialSavings": "$X–$Y estimated savings or null",
+  "explanation": "2-3 paragraph plain English breakdown",
+  "nextSteps": ["1. Dispute this charge", "2. Call provider", etc.]
 }
 
-Be conservative with estimates. Use null if unsure. For paid users, provide more detailed savings and red flags.`;
+Be accurate. Use null if unsure.`;
 
           const [openaiRes, geminiRes] = await Promise.allSettled([
             fetchWithTimeout("https://api.openai.com/v1/chat/completions", {
@@ -251,14 +236,18 @@ Be conservative with estimates. Use null if unsure. For paid users, provide more
           const results = [];
           if (openaiRes.status === "fulfilled") {
             const p = parseResponse(await openaiRes.value.json());
-            if (p) results.push(p);
+            if (p) results.push({ source: "openai", confidence: p.confidence || 0.8, data: p });
           }
           if (geminiRes.status === "fulfilled") {
             const p = parseResponse(await geminiRes.value.json());
-            if (p) results.push(p);
+            if (p) results.push({ source: "gemini", confidence: p.confidence || 0.7, data: p });
           }
 
-          if (results.length > 0) aiResult = mergeResults(results);
+          if (results.length > 0) {
+            // Merge by highest confidence
+            results.sort((a, b) => b.confidence - a.confidence);
+            aiResult = results[0].data;
+          }
         } catch (err) {
           console.error("AI failed:", err);
         }
@@ -267,9 +256,9 @@ Be conservative with estimates. Use null if unsure. For paid users, provide more
         let explanation = aiResult?.explanation || "";
         if (!explanation || explanation.length < 50) {
           if (totalCharges || insurancePaid || patientDue) {
-            explanation = "We extracted key amounts using common bill patterns.";
+            explanation = "We found key amounts using reliable patterns.";
           } else if (text.length > 100) {
-            explanation = "We read your bill but couldn't find standard amounts. Try the summary page.";
+            explanation = "We read your bill but couldn't identify standard amounts. Try the summary page.";
           } else {
             explanation = "We couldn't extract clear text. Try a better photo.";
           }
@@ -289,8 +278,8 @@ Be conservative with estimates. Use null if unsure. For paid users, provide more
           explanation,
           nextSteps: aiResult?.nextSteps || [
             "Double-check amounts on your original bill",
-            "Compare charges at FairHealthConsumer.org",
-            "Contact your provider if anything seems off",
+            "Contact provider to dispute charges",
+            "Compare at FairHealthConsumer.org or your state's rate tool",
           ],
         };
 
@@ -362,6 +351,7 @@ function uint8ArrayToBase64(uint8) {
   return btoa(binary);
 }
 
+// OPTIMIZED GOOGLE VISION CALL
 async function extractWithGoogleVision(uint8, mimeType, env) {
   const base64 = uint8ArrayToBase64(uint8);
   try {
@@ -371,12 +361,18 @@ async function extractWithGoogleVision(uint8, mimeType, env) {
       body: JSON.stringify({
         requests: [{
           image: { content: base64 },
-          features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+          features: [{ type: "DOCUMENT_TEXT_DETECTION", maxResults: 1 }],
           imageContext: { languageHints: ["en"] },
         }],
       }),
     });
-    if (!res.ok) throw new Error(`Vision API error: ${res.status}`);
+
+    if (!res.ok) {
+      const err = await res.text();
+      console.error("Vision API error:", res.status, err);
+      throw new Error(`Vision failed: ${res.status}`);
+    }
+
     const data = await res.json();
     return data.responses?.[0]?.fullTextAnnotation?.text?.trim() || "";
   } catch (err) {

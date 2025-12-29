@@ -1,5 +1,5 @@
-// ExplainMyBill Worker – FINAL WITH FULL ERROR HANDLING (Dec 29, 2025)
-// Robust error handling at every level — user always gets a helpful message
+// ExplainMyBill Worker – FINAL PRODUCTION-READY (Dec 29, 2025)
+// Full error handling • Privacy-first • Reliable extraction
 
 export default {
   async fetch(request, env) {
@@ -16,7 +16,7 @@ export default {
       return new Response(null, { headers: cors });
     }
 
-    // ===================== STRIPE CHECKOUT WITH ERROR HANDLING =====================
+    // STRIPE CHECKOUT
     if (url.pathname === "/create-checkout-session" && request.method === "POST") {
       try {
         const { plan } = await request.json().catch(() => ({}));
@@ -28,9 +28,8 @@ export default {
         }
 
         const priceId = plan === "monthly" ? env.STRIPE_PRICE_MONTHLY : env.STRIPE_PRICE_ONE_TIME;
-
         if (!priceId) {
-          return new Response(JSON.stringify({ error: "Payment configuration error — contact support" }), {
+          return new Response(JSON.stringify({ error: "Payment not configured — contact support" }), {
             status: 500,
             headers: { "Content-Type": "application/json", ...cors },
           });
@@ -55,7 +54,7 @@ export default {
         const data = await res.json();
         if (!res.ok) {
           console.error("Stripe error:", data);
-          return new Response(JSON.stringify({ error: "Payment setup failed — please try again later" }), {
+          return new Response(JSON.stringify({ error: "Payment setup failed — try again later" }), {
             status: 502,
             headers: { "Content-Type": "application/json", ...cors },
           });
@@ -66,14 +65,14 @@ export default {
         });
       } catch (err) {
         console.error("Stripe handler error:", err);
-        return new Response(JSON.stringify({ error: "Payment processing error — please try again" }), {
+        return new Response(JSON.stringify({ error: "Payment error — please try again" }), {
           status: 500,
           headers: { "Content-Type": "application/json", ...cors },
         });
       }
     }
 
-    // ===================== BILL PROCESSING WITH FULL ERROR HANDLING =====================
+    // BILL PROCESSING
     if (request.method === "POST") {
       let text = "";
       let isPaid = false;
@@ -86,20 +85,14 @@ export default {
         if (!file || file.size === 0) {
           return new Response(JSON.stringify({
             error: "No file uploaded",
-            pages: [{
-              rawText: "Please upload a medical bill (PDF, image, or Excel).",
-              structured: { explanation: "No file was received." },
-            }],
+            pages: [{ rawText: "Please select a medical bill to analyze.", structured: { explanation: "No file received." } }],
           }), { status: 400, headers: cors });
         }
 
         if (file.size > 20 * 1024 * 1024) {
           return new Response(JSON.stringify({
             error: "File too large",
-            pages: [{
-              rawText: "File exceeds 20MB limit. Please upload a smaller file or screenshot the summary page.",
-              structured: { explanation: "File size limit exceeded." },
-            }],
+            pages: [{ rawText: "File exceeds 20MB. Try a screenshot of the summary page.", structured: { explanation: "File size limit exceeded." } }],
           }), { status: 413, headers: cors });
         }
 
@@ -107,15 +100,12 @@ export default {
         const allowed = [".pdf",".png",".jpg",".jpeg",".xlsx",".xls"];
         if (!allowed.some(e => name.endsWith(e))) {
           return new Response(JSON.stringify({
-            error: "Unsupported file type",
-            pages: [{
-              rawText: "Supported formats: PDF, PNG, JPG, Excel. Please convert and try again.",
-              structured: { explanation: "Unsupported file format." },
-            }],
+            error: "Unsupported format",
+            pages: [{ rawText: "Please upload PDF, image, or Excel file.", structured: { explanation: "Invalid file type." } }],
           }), { status: 415, headers: cors });
         }
 
-        // Paid status check
+        // Paid check
         if (sessionId) {
           try {
             const r = await fetchWithTimeout(`https://api.stripe.com/v1/checkout/sessions/${sessionId}`, {
@@ -123,45 +113,39 @@ export default {
             });
             const d = await r.json();
             if (r.ok && (d.payment_status === "paid" || d.status === "complete")) isPaid = true;
-          } catch (err) {
-            console.error("Paid check failed:", err);
-            // Continue as free user
-          }
+          } catch {}
         }
 
         const buf = await file.arrayBuffer();
         const u8 = new Uint8Array(buf);
 
-        // TEXT EXTRACTION WITH ERROR HANDLING
+        // TEXT EXTRACTION
         try {
           if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
             const pages = await processExcel(buf);
             text = pages.map(p => p.rawText).join("\n\n");
           } else if (env.GOOGLE_VISION_API_KEY) {
             text = await extractWithGoogleVision(u8, file.type, env);
-            if (!text || text.length < 100) {
-              console.log("Vision low text — falling back to OCR.space");
-              text = await extractWithOcrSpace(u8, file.type, env);
-            }
+            if (text.length < 100) text = await extractWithOcrSpace(u8, file.type, env);
           } else {
             text = await extractWithOcrSpace(u8, file.type, env);
           }
-        } catch (ocrErr) {
-          console.error("OCR failed:", ocrErr);
-          text = "We couldn't read the text from your bill due to a processing error. Please try a clearer image.";
+        } catch (err) {
+          console.error("OCR failed:", err);
+          text = "Text extraction failed — please try a clearer image.";
         }
 
         if (!text || text.length < 50) {
-          text = "We couldn't extract clear text from your bill. Please try a well-lit, straight-on photo of the summary page.";
+          text = "No readable text found. Use a clear photo of the bill summary.";
         }
 
-        // REGEX EXTRACTION (your strong patterns)
+        // REGEX EXTRACTION
         const getAmount = (patterns) => {
           for (const p of patterns) {
             const m = text.match(p);
             if (m) {
               let num = m[1].replace(/[^\d.,]/g, "").trim();
-              num = num.replace(/O/g, "0").replace(/o/g, "0").replace(/l/g, "1").replace(/I/g, "1").replace(/S/g, "5");
+              num = num.replace(/O/g, "0").replace(/l/g, "1").replace(/I/g, "1").replace(/S/g, "5");
               return num ? "$" + num : null;
             }
           }
@@ -173,15 +157,12 @@ export default {
           /amount\s*(?:billed|charged|due|total|owed)[\s:]*\$?([\d.,]+)/i,
           /gross\s*charges?[\s:]*\$?([\d.,]+)/i,
           /subtotal[\s:]*\$?([\d.,]+)/i,
-          /statement\s*balance[\s:]*\$?([\d.,]+)/i,
         ]);
 
         const insurancePaid = getAmount([
           /insurance\s*(?:paid|payment|adjustment|allowed|credit|reimbursement|benefit)[\s:]*\$?([\d.,]+)/i,
           /paid\s*by\s*insurance[\s:]*\$?([\d.,]+)/i,
           /contractual\s*(?:adjustment|write.?off|discount|savings)[\s:]*\$?([\d.,]+)/i,
-          /insurance\s*adjustment[\s:]*\$?([\d.,]+)/i,
-          /allowed\s*amount[\s:]*\$?([\d.,]+)/i,
         ]);
 
         const patientDue = getAmount([
@@ -189,13 +170,10 @@ export default {
           /you\s*owe[\s:]*\$?([\d.,]+)/i,
           /amount\s*due[\s:]*\$?([\d.,]+)/i,
           /balance\s*due[\s:]*\$?([\d.,]+)/i,
-          /patient\s*balance[\s:]*\$?([\d.,]+)/i,
-          /your\s*responsibility[\s:]*\$?([\d.,]+)/i,
           /current\s*amount\s*due[\s:]*\$?([\d.,]+)/i,
-          /please\s*pay\s*this\s*amount[\s:]*\$?([\d.,]+)/i,
         ]);
 
-        // AI ANALYSIS WITH ERROR HANDLING
+        // AI
         let aiResult = null;
         try {
           const openModel = isPaid ? "gpt-4o" : "gpt-4o-mini";
@@ -213,14 +191,12 @@ Return ONLY valid JSON:
     "insurancePaid": "$X,XXX.XX" or null,
     "patientResponsibility": "$X,XXX.XX" or null
   },
-  "potentialSavings": "$X,XXX–$Y,YYY possible savings" or null,
+  "potentialSavings": "$X,XXX–$Y,YYY" or null,
   "explanation": "Clear explanation in 2-3 sentences",
   "redFlags": [] or list,
   "services": [] or list,
   "nextSteps": [] or list
-}
-
-Use null if unsure.`;
+}`;
 
           const [o, g] = await Promise.allSettled([
             fetchWithTimeout("https://api.openai.com/v1/chat/completions", {
@@ -245,28 +221,25 @@ Use null if unsure.`;
             if (p) results.push(p);
           }
 
-          if (results.length > 0) {
-            aiResult = merge(results);
-          }
+          if (results.length > 0) aiResult = merge(results);
         } catch (err) {
-          console.error("AI analysis failed:", err);
-          // Continue with regex results
+          console.error("AI failed:", err);
         }
 
-        // SMART EXPLANATION
+        // FINAL RESULT
         let explanation = aiResult?.explanation || "";
         if (!explanation || explanation.length < 50) {
           if (totalCharges || insurancePaid || patientDue) {
-            explanation = "We found some amounts on your bill using standard patterns. The values above are accurate based on common billing terms.";
+            explanation = "We found key amounts using standard billing patterns. These are the most likely values from your bill.";
           } else if (text.length > 100) {
-            explanation = "We read text from your bill but couldn't confidently identify the main amounts. The bill may use unusual formatting. Try uploading just the summary page.";
+            explanation = "We read your bill but couldn't identify standard amounts. The format may be unusual — try uploading just the summary page.";
           } else {
-            explanation = "We couldn't extract readable text from your bill. Please try a clearer, well-lit photo of the summary page.";
+            explanation = "We couldn't read clear text from your bill. Please try a well-lit photo of the summary page.";
           }
         }
 
         const result = {
-          summary: aiResult?.summary || "Your bill was analyzed.",
+          summary: aiResult?.summary || "Bill analyzed.",
           keyAmounts: {
             totalCharges: aiResult?.keyAmounts?.totalCharges || totalCharges || "Not detected",
             insurancePaid: aiResult?.keyAmounts?.insurancePaid || insurancePaid || "Not detected",
@@ -276,11 +249,7 @@ Use null if unsure.`;
           redFlags: aiResult?.redFlags || [],
           potentialSavings: isPaid ? (aiResult?.potentialSavings || null) : null,
           explanation,
-          nextSteps: aiResult?.nextSteps || [
-            "Double-check amounts on your original bill",
-            "Compare charges at FairHealthConsumer.org",
-            "Call your provider if anything seems wrong",
-          ],
+          nextSteps: aiResult?.nextSteps || ["Review amounts", "Compare at FairHealthConsumer.org", "Contact provider if needed"],
         };
 
         return new Response(JSON.stringify({
@@ -290,50 +259,70 @@ Use null if unsure.`;
         }), { headers: { "Content-Type": "application/json", ...cors } });
 
       } catch (err) {
-        console.error("Critical worker error:", err);
+        console.error("Critical error:", err);
         return new Response(JSON.stringify({
-          error: "Something went wrong processing your bill",
+          error: "Processing failed",
           pages: [{
-            rawText: "We're having trouble analyzing this bill. Please try again or upload a different version.",
-            structured: { explanation: "Temporary processing issue — please try again shortly." },
+            rawText: "We're having trouble analyzing your bill.",
+            structured: { explanation: "Please try again in a few minutes or use a different photo." },
           }],
         }), { status: 500, headers: cors });
       }
     }
 
-    return new Response("ExplainMyBill Worker – Running", { headers: cors });
+    // FRIENDLY ROOT PAGE
+    return new Response(`
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>ExplainMyBill API</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: system-ui, sans-serif; text-align: center; padding: 4rem; background: #f8fafc; color: #1e40af; }
+    h1 { font-size: 3rem; margin-bottom: 1rem; }
+    p { font-size: 1.25rem; color: #0369a1; max-width: 600px; margin: 1rem auto; }
+    code { background: #e0f2fe; padding: 0.25rem 0.5rem; border-radius: 0.5rem; }
+    a { color: #1d4ed8; text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <h1>🟢 ExplainMyBill Worker Running</h1>
+  <p>This is the secure backend for <strong>ExplainMyBill</strong>.</p>
+  <p>Frontend: <a href="https://explain-my-bill-frontend.onrender.com" target="_blank">explain-my-bill-frontend.onrender.com</a></p>
+  <p><code>POST /</code> → Upload bill<br><code>POST /create-checkout-session</code> → Upgrade</p>
+  <p>Status: Active • Dec 29, 2025</p>
+</body>
+</html>
+    `, {
+      status: 200,
+      headers: { "Content-Type": "text/html", ...cors },
+    });
   },
 };
 
-// HELPERS (with error handling)
+// HELPERS
 async function fetchWithTimeout(u, o = {}, t = 15000) {
   const c = new AbortController();
   const id = setTimeout(() => c.abort(), t);
   try { return await fetch(u, { ...o, signal: c.signal }); }
-  catch (err) { throw new Error("Request timeout or network error"); }
+  catch { throw new Error("Request failed"); }
   finally { clearTimeout(id); }
 }
 
-async function extractWithGoogleVision(u8, mimeType, env) {
-  const base64 = uint8ArrayToBase64(u8);
+async function extractWithGoogleVision(u8, type, env) {
+  const b64 = uint8ArrayToBase64(u8);
   try {
-    const res = await fetchWithTimeout("https://vision.googleapis.com/v1/images:annotate?key=" + env.GOOGLE_VISION_API_KEY, {
+    const res = await fetchWithTimeout(`https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        requests: [{
-          image: { content: base64 },
-          features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
-          imageContext: { languageHints: ["en"] },
-        }],
+        requests: [{ image: { content: b64 }, features: [{ type: "DOCUMENT_TEXT_DETECTION" }], imageContext: { languageHints: ["en"] } }],
       }),
     });
     const data = await res.json();
     return data.responses?.[0]?.fullTextAnnotation?.text?.trim() || "";
-  } catch (err) {
-    console.error("Google Vision failed:", err);
-    return "";
-  }
+  } catch { return ""; }
 }
 
 async function extractWithOcrSpace(u8, type, env) {
@@ -346,10 +335,7 @@ async function extractWithOcrSpace(u8, type, env) {
     });
     const j = await res.json();
     return j.ParsedResults?.[0]?.ParsedText?.trim() || "";
-  } catch (err) {
-    console.error("OCR.space failed:", err);
-    return "";
-  }
+  } catch { return ""; }
 }
 
 function uint8ArrayToBase64(u) {
@@ -371,10 +357,7 @@ function merge(arr) {
   const fields = ["summary","explanation","potentialSavings","services","redFlags","nextSteps","keyAmounts"];
   for (const f of fields) {
     for (const o of arr) {
-      if (o[f] !== null && o[f] !== undefined) {
-        r[f] = o[f];
-        break;
-      }
+      if (o[f] !== null && o[f] !== undefined) { r[f] = o[f]; break; }
     }
   }
   return r;
@@ -385,8 +368,7 @@ async function processExcel(buf) {
     const XLSX = await import("https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm");
     const wb = XLSX.read(new Uint8Array(buf), { type: "array" });
     return wb.SheetNames.map((n, i) => ({ page: i + 1, rawText: XLSX.utils.sheet_to_csv(wb.Sheets[n]) || "" }));
-  } catch (err) {
-    console.error("Excel processing failed:", err);
+  } catch {
     return [{ page: 1, rawText: "Could not read Excel file." }];
   }
 }

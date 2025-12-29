@@ -1,4 +1,4 @@
-// ExplainMyBill Worker – FULL PDF-to-Image + Dual AI (Dec 29, 2025)
+// ExplainMyBill Worker – FULL PDF-to-Image + Dual AI + DEV BYPASS (Dec 29, 2025)
 
 export default {
   async fetch(request, env) {
@@ -99,6 +99,8 @@ async function handleStripeCheckout(request, env, cors) {
 // ======================== Bill Processing ========================
 async function handleBillProcessing(request, env, cors) {
   try {
+    const devBypass = request.headers.get("X-Dev-Bypass") === "true";
+
     const form = await request.formData();
     const file = form.get("bill") || form.get("file");
     const sessionId = form.get("sessionId");
@@ -113,7 +115,11 @@ async function handleBillProcessing(request, env, cors) {
     }
 
     let isPaid = false;
-    if (sessionId) {
+
+    // 🔓 DEV MODE OVERRIDE
+    if (devBypass) {
+      isPaid = true;
+    } else if (sessionId) {
       try {
         const r = await fetchWithTimeout(
           `https://api.stripe.com/v1/checkout/sessions/${sessionId}`,
@@ -178,6 +184,7 @@ async function handleBillProcessing(request, env, cors) {
 
     return new Response(JSON.stringify({
       isPaid,
+      devBypass,
       pages: [{ page: 1, rawText: text, structured: finalResult }],
       explanation: finalResult.explanation,
     }), {

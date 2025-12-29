@@ -1,9 +1,3 @@
-// ExplainMyBill Worker – FINAL FULL CODE FIX (Dec 2025)
-// FIXED: All helpers defined before use (fallbackStructured, mergeWithConfidence, etc.)
-// FIXED: AI analysis always runs – even on partial text
-// OCR: Synchronous Google Vision – reliable for images & searchable PDFs
-// For scanned PDFs: Recommend clear JPG/PNG screenshots (best no-storage solution)
-
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -24,7 +18,40 @@ export default {
 
     // STRIPE CHECKOUT
     if (url.pathname === "/create-checkout-session" && request.method === "POST") {
-      // ... your full Stripe code preserved
+      try {
+        const { plan } = await request.json();
+        if (!["monthly", "one-time"].includes(plan)) throw new Error("Invalid plan");
+
+        const priceId = plan === "monthly" ? env.STRIPE_PRICE_MONTHLY : env.STRIPE_PRICE_ONE_TIME;
+
+        const sessionRes = await fetch("https://api.stripe.com/v1/checkout/sessions", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${env.STRIPE_SECRET_KEY}`,
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+          body: new URLSearchParams({
+            "payment_method_types[0]": "card",
+            "line_items[0][price]": priceId,
+            "line_items[0][quantity]": "1",
+            mode: plan === "monthly" ? "subscription" : "payment",
+            success_url: "https://explain-my-bill-frontend.onrender.com/success?session_id={CHECKOUT_SESSION_ID}",
+            cancel_url: "https://explain-my-bill-frontend.onrender.com/cancel",
+          }),
+        });
+
+        const data = await sessionRes.json();
+        if (!sessionRes.ok) throw new Error(data.error?.message || "Stripe checkout failed");
+
+        return new Response(JSON.stringify({ id: data.id }), {
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
+      }
     }
 
     // MAIN BILL PROCESSING
@@ -45,12 +72,14 @@ export default {
         let isPaid = false;
         if (sessionId) {
           try {
-            const res = await fetchWithTimeout(`https://api.stripe.com/v1/checkout/sessions/${sessionId}`, {
+            const res = await fetch(`https://api.stripe.com/v1/checkout/sessions/${sessionId}`, {
               headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` },
             });
             const data = await res.json();
             if (res.ok && (data.payment_status === "paid" || data.status === "complete")) isPaid = true;
-          } catch (e) {}
+          } catch (e) {
+            console.error("Stripe verification failed:", e);
+          }
         }
 
         const buffer = await billFile.arrayBuffer();
@@ -70,16 +99,11 @@ export default {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
-                requests: [
-                  {
-                    inputConfig: {
-                      content: base64,
-                      mimeType: "application/pdf",
-                    },
-                    features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
-                    pages: [1, 2, 3, 4, 5],
-                  },
-                ],
+                requests: [{
+                  inputConfig: { content: base64, mimeType: "application/pdf" },
+                  features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+                  pages: [1, 2, 3, 4, 5],
+                }],
               }),
             }
           );
@@ -93,7 +117,7 @@ export default {
                 page: i + 1,
                 rawText: r.fullTextAnnotation?.text || "[No text on this page]",
               }))
-            : [{ page: 1, rawText: "[No text detected in PDF – try a clear JPG/PNG screenshot]" }];
+            : [{ page: 1, rawText: "[No text detected in PDF]" }];
         } else {
           const res = await fetchWithTimeout(
             `https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
@@ -101,12 +125,10 @@ export default {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
-                requests: [
-                  {
-                    image: { content: base64 },
-                    features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
-                  },
-                ],
+                requests: [{
+                  image: { content: base64 },
+                  features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+                }],
               }),
             }
           );
@@ -120,11 +142,8 @@ export default {
           }];
         }
 
-        // Detect any text (even short)
         for (const page of pages) {
-          if (page.rawText && page.rawText.trim().length > 20) {
-            anyTextDetected = true;
-          }
+          if (page.rawText && page.rawText.trim().length > 20) anyTextDetected = true;
         }
 
         // AI ANALYSIS – ALWAYS RUNS
@@ -138,38 +157,20 @@ Analyze the bill text and respond with ONLY valid JSON in this exact structure:
 
 {
   "summary": "One clear sentence summarizing the entire bill",
-  "summaryPoints": [
-    "Most important insight #1",
-    "Most important insight #2",
-    "Most important insight #3 (optional)"
-  ],
+  "summaryPoints": ["Most important insight #1", "Most important insight #2"],
   "keyAmounts": {
     "totalCharges": "Extracted total billed amount as string with $ or null",
     "insuranceAdjusted": "Amount written off/adjusted or null",
     "insurancePaid": "Amount insurance paid or null",
     "patientResponsibility": "Final amount patient owes or null"
   },
-  "confidences": {
-    "totalCharges": 0-100 confidence score,
-    "insuranceAdjusted": 0-100,
-    "insurancePaid": 0-100,
-    "patientResponsibility": 0-100
-  },
+  "confidences": { "totalCharges": 0-100, "insuranceAdjusted": 0-100, "insurancePaid": 0-100, "patientResponsibility": 0-100 },
   "services": ["Short list of main services/procedures as strings"],
   "redFlags": ["Potential issues, overcharges, or errors as strings (empty array if none)"],
-  "potentialSavings": "Precise estimated savings range based on FAIR Health/CMS data (e.g. '$800–$2,500 possible savings') or null if no clear potential",
+  "potentialSavings": "Estimated savings range or null",
   "explanation": "Clear, calm, plain-English explanation in 2-4 short paragraphs",
-  "nextSteps": ["Ranked actionable steps, most important first"]
+  "nextSteps": ["Ranked actionable steps"]
 }
-
-Rules for potentialSavings (be conservative and evidence-based):
-- Use FAIR Health Consumer and CMS data as reference for typical rates.
-- Average overcharge error saves ~$1,300 on bills >$10k.
-- Successful negotiation typically reduces patient responsibility by 25–50%.
-- If redFlags present: estimate 20–40% of patientResponsibility or totalCharges.
-- If charges seem high vs typical rates: 10–30% range.
-- Never invent numbers — only estimate if clear evidence in text.
-- For free users: lower or null estimate and end explanation with upgrade message.
 
 Bill text:
 """${page.rawText || ""}"""
@@ -193,32 +194,22 @@ Bill text:
                   max_tokens: isPaid ? 1200 : 300,
                 }),
               }),
-              fetchWithTimeout(
-                `https://generativelanguage.googleapis.com/v1beta/models/${modelGemini}:generateContent?key=${env.GEMINI_API_KEY}`,
-                {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    contents: [{ role: "user", parts: [{ text: prompt }] }],
-                    generationConfig: {
-                      temperature: 0.2,
-                      maxOutputTokens: isPaid ? 1200 : 300,
-                    },
-                  }),
-                }
-              ),
+              fetchWithTimeout(`https://generativelanguage.googleapis.com/v1beta/models/${modelGemini}:generateContent?key=${env.GEMINI_API_KEY}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  contents: [{ role: "user", parts: [{ text: prompt }] }],
+                  generationConfig: { temperature: 0.2, maxOutputTokens: isPaid ? 1200 : 300 },
+                }),
+              }),
             ]);
 
-            const openAiData = await openAiRes.json();
-            const geminiData = await geminiRes.json();
-
-            openAiParsed = parseAiResponse(openAiData);
-            geminiParsed = parseGeminiResponse(geminiData);
-          } catch (aiErr) {
-            console.error("AI call failed:", aiErr);
+            openAiParsed = parseAiResponse(await openAiRes.json());
+            geminiParsed = parseGeminiResponse(await geminiRes.json());
+          } catch (e) {
+            console.error("AI call failed:", e);
           }
 
-          // Always use AI if at least one succeeded
           if (openAiParsed || geminiParsed) {
             page.structured = mergeWithConfidence(openAiParsed, geminiParsed, isPaid);
             page.explanation = page.structured.explanation || "Analysis complete.";
@@ -228,22 +219,15 @@ Bill text:
           }
         }
 
-        let fullExplanation = pages.map(p => p.explanation).join("\n\n");
+        const fullExplanation = pages.map(p => p.explanation).join("\n\n");
 
-        if (!anyTextDetected) {
-          fullExplanation = (isPaid
-            ? "No readable text detected. For best results, upload a clear photo of the bill summary page."
-            : "No readable text detected. Basic analysis complete. Upgrade for advanced review.") + "\n\n" + fullExplanation;
-        }
-
-        return new Response(
-          JSON.stringify({
-            isPaid,
-            pages: pages.map(p => ({ page: p.page, structured: p.structured, explanation: p.explanation })),
-            explanation: fullExplanation,
-          }),
-          { headers: { "Content-Type": "application/json", ...corsHeaders } }
-        );
+        return new Response(JSON.stringify({
+          isPaid,
+          pages: pages.map(p => ({ page: p.page, structured: p.structured, explanation: p.explanation })),
+          explanation: fullExplanation || "Analysis complete.",
+        }), {
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
       } catch (err) {
         console.error("Worker error:", err);
         return new Response(JSON.stringify({ error: err.message || "Processing failed" }), {
@@ -257,8 +241,7 @@ Bill text:
   },
 };
 
-// ===================== ALL HELPERS (DEFINED BEFORE USE) =====================
-
+// ALL HELPERS – MUST BE DEFINED
 async function fetchWithTimeout(url, options = {}, timeout = 15000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
@@ -283,7 +266,7 @@ function parseAiResponse(data) {
     let content = data.choices?.[0]?.message?.content?.trim() || "{}";
     content = content.replace(/^```json\n?/, "").replace(/\n?```$/, "").trim();
     return JSON.parse(content);
-  } catch (e) {
+  } catch {
     return null;
   }
 }
@@ -291,9 +274,8 @@ function parseAiResponse(data) {
 function parseGeminiResponse(data) {
   try {
     const content = data.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
-    const cleaned = content.replace(/^```json\n?/, "").replace(/\n?```$/, "").trim();
-    return JSON.parse(cleaned);
-  } catch (e) {
+    return JSON.parse(content.replace(/^```json\n?/, "").replace(/\n?```$/, "").trim());
+  } catch {
     return null;
   }
 }
@@ -310,17 +292,12 @@ function fallbackStructured(isPaid) {
     explanation: isPaid
       ? "Detailed analysis completed using dual AI verification."
       : "Basic analysis complete. Upgrade for full expert review, red flags, and personalized appeal tools.",
-    nextSteps: [
-      "Request a detailed itemized bill from your provider",
-      "Compare charges on FairHealthConsumer.org",
-      "Call your insurance using the claim number"
-    ],
+    nextSteps: ["Request itemized bill", "Compare charges", "Call insurance"],
   };
 }
 
 function mergeWithConfidence(openAi, gemini, isPaid) {
   const fallback = fallbackStructured(isPaid);
-
   if (!openAi && !gemini) return fallback;
 
   const a = openAi || {};
@@ -333,18 +310,11 @@ function mergeWithConfidence(openAi, gemini, isPaid) {
     const valB = b.keyAmounts?.[field];
     const confA = aConf[field] || 0;
     const confB = bConf[field] || 0;
-
     if (valA && valB) return confA >= confB ? valA : valB;
-    if (valA) return valA;
-    if (valB) return valB;
-    return null;
+    return valA || valB || null;
   };
 
-  const longerExplanation = (a.explanation || "").length >= (b.explanation || "").length 
-    ? a.explanation 
-    : b.explanation;
-
-  const potentialSavings = a.potentialSavings || b.potentialSavings || null;
+  const longerExplanation = (a.explanation || "").length >= (b.explanation || "").length ? a.explanation : b.explanation;
 
   return {
     summary: a.summary || b.summary || fallback.summary,
@@ -363,7 +333,7 @@ function mergeWithConfidence(openAi, gemini, isPaid) {
     },
     services: [...new Set([...(a.services || []), ...(b.services || [])])],
     redFlags: [...new Set([...(a.redFlags || []), ...(b.redFlags || [])])],
-    potentialSavings,
+    potentialSavings: a.potentialSavings || b.potentialSavings || null,
     explanation: longerExplanation || fallback.explanation,
     nextSteps: [...new Set([...(a.nextSteps || []), ...(b.nextSteps || [])])],
   };

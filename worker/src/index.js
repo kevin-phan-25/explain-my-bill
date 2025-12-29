@@ -1,4 +1,5 @@
 // ExplainMyBill Worker – FULL PDF-to-Image + Dual AI + DEV BYPASS (Dec 29, 2025)
+// ✅ Updated for detailed logging and safer error handling
 
 export default {
   async fetch(request, env) {
@@ -15,16 +16,17 @@ export default {
       return new Response(null, { headers: cors });
     }
 
-    if (url.pathname === "/create-checkout-session" && request.method === "POST") {
-      return await handleStripeCheckout(request, env, cors);
-    }
+    try {
+      if (url.pathname === "/create-checkout-session" && request.method === "POST") {
+        return await handleStripeCheckout(request, env, cors);
+      }
 
-    if (request.method === "POST") {
-      return await handleBillProcessing(request, env, cors);
-    }
+      if (request.method === "POST") {
+        return await handleBillProcessing(request, env, cors);
+      }
 
-    // Root Page
-    return new Response(`
+      // Root Page
+      return new Response(`
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -47,7 +49,12 @@ a { color: #1d4ed8; text-decoration: underline; }
 <p>Status: Active • Dec 29, 2025</p>
 </body>
 </html>
-    `, { status: 200, headers: { "Content-Type": "text/html", ...cors } });
+      `, { status: 200, headers: { "Content-Type": "text/html", ...cors } });
+
+    } catch (err) {
+      console.error("Worker root error:", err);
+      return errorResponse("Unexpected server error: " + err.message, 500, cors);
+    }
   },
 };
 
@@ -90,9 +97,10 @@ async function handleStripeCheckout(request, env, cors) {
     return new Response(JSON.stringify({ id: data.id }), {
       headers: { "Content-Type": "application/json", ...cors },
     });
+
   } catch (err) {
-    console.error(err);
-    return errorResponse("Stripe checkout failed", 500, cors);
+    console.error("Stripe checkout failed:", err);
+    return errorResponse("Stripe checkout failed: " + err.message, 500, cors);
   }
 }
 
@@ -100,7 +108,6 @@ async function handleStripeCheckout(request, env, cors) {
 async function handleBillProcessing(request, env, cors) {
   try {
     const devBypass = request.headers.get("X-Dev-Bypass") === "true";
-
     const form = await request.formData();
     const file = form.get("bill") || form.get("file");
     const sessionId = form.get("sessionId");
@@ -119,6 +126,7 @@ async function handleBillProcessing(request, env, cors) {
     // 🔓 DEV MODE OVERRIDE
     if (devBypass) {
       isPaid = true;
+      console.log("DEV BYPASS ENABLED: isPaid forced true");
     } else if (sessionId) {
       try {
         const r = await fetchWithTimeout(
@@ -129,24 +137,30 @@ async function handleBillProcessing(request, env, cors) {
         if (r.ok && (d.payment_status === "paid" || d.status === "complete")) {
           isPaid = true;
         }
-      } catch {}
+      } catch (e) {
+        console.warn("Stripe session check failed:", e);
+      }
     }
 
     const buf = await file.arrayBuffer();
     const u8 = new Uint8Array(buf);
-
     let text = "";
+
+    console.log("Starting OCR/Parsing for file:", name);
+
     if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
       const pages = await processExcel(buf);
       text = pages.map(p => p.rawText).join("\n\n");
     } else if (name.endsWith(".pdf")) {
       text = await extractTextFromPDFasImages(u8, env);
       if (!text || text.length < 100) {
+        console.log("PDF OCR fallback using OCR.space");
         text = await extractWithOcrSpace(u8, "application/pdf", env);
       }
     } else {
       text = await extractWithGoogleVision(u8, file.type, env);
       if (!text || text.length < 100) {
+        console.log("Image OCR fallback using OCR.space");
         text = await extractWithOcrSpace(u8, file.type, env);
       }
     }
@@ -165,6 +179,8 @@ async function handleBillProcessing(request, env, cors) {
       /patient\s*(?:responsibility|due|balance|owe|amount\s*due)[\s:]*\$?([\d.,]+)/i,
     ]);
 
+    console.log("Extracted amounts:", { totalCharges, insurancePaid, patientDue });
+
     const aiResult = await analyzeWithAI(text, isPaid, env);
 
     const finalResult = {
@@ -182,6 +198,8 @@ async function handleBillProcessing(request, env, cors) {
       nextSteps: aiResult?.nextSteps || [],
     };
 
+    console.log("Final structured result ready");
+
     return new Response(JSON.stringify({
       isPaid,
       devBypass,
@@ -193,7 +211,7 @@ async function handleBillProcessing(request, env, cors) {
 
   } catch (err) {
     console.error("Critical worker error:", err);
-    return errorResponse("Processing failed", 500, cors);
+    return errorResponse("Processing failed: " + err.message, 500, cors);
   }
 }
 
@@ -266,7 +284,8 @@ async function analyzeWithAI(text, isPaid, env) {
 
     const data = await res.json();
     return parseResponse(data);
-  } catch {
+  } catch (err) {
+    console.warn("AI analysis failed:", err);
     return null;
   }
 }
@@ -289,26 +308,32 @@ async function extractWithGoogleVision(uint8, mimeType, env) {
     );
     const data = await res.json();
     return data.responses?.[0]?.fullTextAnnotation?.text || "";
-  } catch {
+  } catch (err) {
+    console.warn("Google Vision OCR failed:", err);
     return "";
   }
 }
 
 async function extractWithOcrSpace(uint8, mimeType, env) {
   const base64 = uint8ArrayToBase64(uint8);
-  const res = await fetch("https://api.ocr.space/parse/image", {
-    method: "POST",
-    headers: {
-      apikey: env.OCR_SPACE_API_KEY,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams({
-      base64Image: `data:${mimeType};base64,${base64}`,
-      language: "eng",
-    }),
-  });
-  const json = await res.json();
-  return json.ParsedResults?.[0]?.ParsedText || "";
+  try {
+    const res = await fetch("https://api.ocr.space/parse/image", {
+      method: "POST",
+      headers: {
+        apikey: env.OCR_SPACE_API_KEY,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        base64Image: `data:${mimeType};base64,${base64}`,
+        language: "eng",
+      }),
+    });
+    const json = await res.json();
+    return json.ParsedResults?.[0]?.ParsedText || "";
+  } catch (err) {
+    console.warn("OCR.space failed:", err);
+    return "";
+  }
 }
 
 function uint8ArrayToBase64(uint8) {

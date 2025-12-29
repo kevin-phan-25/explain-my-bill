@@ -1,5 +1,7 @@
 // ExplainMyBill Worker – FINAL PRODUCTION-READY (Dec 29, 2025)
-// Google Vision primary • OCR.space fallback • Dual AI • Strong regex • Full error handling
+// Google Vision primary • OCR.space fallback • Dual AI • Ultra-robust regex for any bill type
+// In-memory only • No data retained • Paid features: savings estimates, red flags, detailed steps
+// Trusted one-stop shop for understanding any bill (medical, utility, credit card, etc.)
 
 export default {
   async fetch(request, env) {
@@ -18,13 +20,13 @@ export default {
     if (url.pathname === "/create-checkout-session" && request.method === "POST") {
       try {
         const { plan } = await request.json().catch(() => ({}));
-        if (!["monthly", "one-time"].includes(plan)) {
+        if (!["monthly", "one-time", "lifetime"].includes(plan)) {
           return new Response(JSON.stringify({ error: "Invalid plan selected" }), {
             status: 400,
             headers: { "Content-Type": "application/json", ...cors },
           });
         }
-        const priceId = plan === "monthly" ? env.STRIPE_PRICE_MONTHLY : env.STRIPE_PRICE_ONE_TIME;
+        const priceId = plan === "monthly" ? env.STRIPE_PRICE_MONTHLY : plan === "lifetime" ? env.STRIPE_PRICE_LIFETIME : env.STRIPE_PRICE_ONE_TIME;
         if (!priceId) {
           return new Response(JSON.stringify({ error: "Payment configuration error — contact support" }), {
             status: 500,
@@ -41,7 +43,7 @@ export default {
             "payment_method_types[0]": "card",
             "line_items[0][price]": priceId,
             "line_items[0][quantity]": "1",
-            mode: plan === "monthly" ? "subscription" : "payment",
+            mode: plan === "monthly" || plan === "lifetime" ? "subscription" : "payment",  // Lifetime as subscription with no recurring charge
             success_url: "https://explain-my-bill-frontend.onrender.com/success?session_id={CHECKOUT_SESSION_ID}",
             cancel_url: "https://explain-my-bill-frontend.onrender.com/cancel",
           }),
@@ -76,7 +78,7 @@ export default {
         if (!file || file.size === 0) {
           return new Response(JSON.stringify({
             error: "No file uploaded",
-            pages: [{ rawText: "Please select a medical bill to analyze.", structured: { explanation: "No file received." } }],
+            pages: [{ rawText: "Please select a bill to analyze.", structured: { explanation: "No file received." } }],
           }), { status: 400, headers: cors });
         }
         if (file.size > 20 * 1024 * 1024) {
@@ -105,7 +107,7 @@ export default {
         }
         const buf = await file.arrayBuffer();
         const u8 = new Uint8Array(buf);
-        // TEXT EXTRACTION – Google Vision first (best quality)
+        // TEXT EXTRACTION – Google Vision first
         try {
           if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
             const pages = await processExcel(buf);
@@ -113,82 +115,104 @@ export default {
           } else {
             if (env.GOOGLE_VISION_API_KEY) {
               text = await extractWithGoogleVision(u8, file.type, env);
-              console.log("Vision text length:", text.length);
             }
-            // Fallback: OCR.space if Vision failed or returned little text
             if (!text || text.length < 100) {
-              console.log("Vision low text — falling back to OCR.space");
               text = await extractWithOcrSpace(u8, file.type, env);
             }
           }
         } catch (err) {
-          console.error("All OCR failed:", err);
-          text = "We couldn't extract text from your bill. Please try a clearer, well-lit photo.";
+          console.error("OCR failed:", err);
+          text = "We couldn't read your bill clearly. Try a better photo.";
         }
         if (!text || text.length < 50) {
-          text = "No readable text detected. Try a straight-on, high-resolution photo of the summary page.";
+          text = "No text detected. Try a clear, well-lit photo of the summary page.";
         }
-        // STRONG REGEX EXTRACTION
+        // ULTRA-ROBUST REGEX – handles medical, utility, credit card, etc.
         const getAmount = (patterns) => {
           for (const p of patterns) {
             const m = text.match(p);
             if (m) {
-              const num = m[1].replace(/[^\d.,]/g, "").trim();
+              let num = m[1].replace(/[^\d.,]/g, "").trim();
+              num = num.replace(/[OolIS]/g, c => ({O:"0",o:"0",l:"1",I:"1",S:"5"}[c] || c));
               return num ? "$" + num : null;
             }
           }
           return null;
         };
         const totalCharges = getAmount([
-          /total\s*(?:charges?|billed|amount|due|billed\s*amount)[\s:]*\$?([\d,]+\.?\d*)/i,
-          /gross\s*charges?[\s:]*\$?([\d,]+\.?\d*)/i,
-          /amount\s*billed[\s:]*\$?([\d,]+\.?\d*)/i,
-          /charges\s*total[\s:]*\$?([\d,]+\.?\d*)/i,
+          /total\s*(?:charges?|billed|amount|due|balance|cost|fees?|bill|owed)[\s:]*\$?([\d.,]+)/i,
+          /amount\s*(?:billed|charged|due|total|owed)[\s:]*\$?([\d.,]+)/i,
+          /gross\s*charges?[\s:]*\$?([\d.,]+)/i,
+          /subtotal[\s:]*\$?([\d.,]+)/i,
+          /statement\s*balance[\s:]*\$?([\d.,]+)/i,
+          /balance\s*forward[\s:]*\$?([\d.,]+)/i,
+          /previous\s*balance[\s:]*\$?([\d.,]+)/i,
+          /new\s*charges?[\s:]*\$?([\d.,]+)/i,
+          /total\s*due[\s:]*\$?([\d.,]+)/i,
         ]);
         const insurancePaid = getAmount([
-          /insurance\s*(?:paid|payment|adjustment)[\s:]*\$?([\d,]+\.?\d*)/i,
-          /paid\s*by\s*insurance[\s:]*\$?([\d,]+\.?\d*)/i,
-          /contractual\s*adjustment[\s:]*\$?([\d,]+\.?\d*)/i,
-          /insurance\s*adjustment[\s:]*\$?([\d,]+\.?\d*)/i,
+          /insurance\s*(?:paid|payment|adjustment|allowed|credit|reimbursement|benefit|discount)[\s:]*\$?([\d.,]+)/i,
+          /paid\s*by\s*insurance[\s:]*\$?([\d.,]+)/i,
+          /contractual\s*(?:adjustment|write.?off|discount|savings)[\s:]*\$?([\d.,]+)/i,
+          /insurance\s*adjustment[\s:]*\$?([\d.,]+)/i,
+          /allowed\s*amount[\s:]*\$?([\d.,]+)/i,
+          /plan\s*paid[\s:]*\$?([\d.,]+)/i,
+          /payments?[\s:]*\$?([\d.,]+)/i,
+          /credits?[\s:]*\$?([\d.,]+)/i,
         ]);
         const patientDue = getAmount([
-          /patient\s*(?:responsibility|due|balance|owe)[\s:]*\$?([\d,]+\.?\d*)/i,
-          /you\s*owe[\s:]*\$?([\d,]+\.?\d*)/i,
-          /amount\s*due[\s:]*\$?([\d,]+\.?\d*)/i,
-          /balance\s*due[\s:]*\$?([\d,]+\.?\d*)/i,
+          /patient\s*(?:responsibility|due|balance|owe|amount\s*due|portion|liability|share|balance\s*due)[\s:]*\$?([\d.,]+)/i,
+          /you\s*owe[\s:]*\$?([\d.,]+)/i,
+          /amount\s*due[\s:]*\$?([\d.,]+)/i,
+          /balance\s*due[\s:]*\$?([\d.,]+)/i,
+          /patient\s*balance[\s:]*\$?([\d.,]+)/i,
+          /your\s*responsibility[\s:]*\$?([\d.,]+)/i,
+          /current\s*amount\s*due[\s:]*\$?([\d.,]+)/i,
+          /please\s*pay\s*this\s*amount[\s:]*\$?([\d.,]+)/i,
+          /minimum\s*payment[\s:]*\$?([\d.,]+)/i,
+          /due\s*now[\s:]*\$?([\d.,]+)/i,
         ]);
-        // DUAL AI ANALYSIS
+        // DUAL AI ANALYSIS – general for any bill type
         let aiResult = null;
         try {
           const openModel = isPaid ? "gpt-4o" : "gpt-4o-mini";
           const gemModel = isPaid ? "gemini-1.5-pro" : "gemini-1.5-flash";
-          const prompt = `Extract key information from this medical bill text:
+          const prompt = `You are an expert bill analyst helping users understand any type of bill (medical, utility, credit card, etc.) in plain English.
+
+Analyze this extracted bill text:
 """${text}"""
+
 Return ONLY valid JSON:
 {
-  "summary": "One sentence summary",
+  "summary": "One clear sentence summarizing the bill",
+  "summaryPoints": [
+    "Key insight #1",
+    "Key insight #2",
+    "Key insight #3 (optional)"
+  ],
   "keyAmounts": {
-    "totalCharges": "$X,XXX.XX" or null,
-    "insurancePaid": "$X,XXX.XX" or null,
-    "patientResponsibility": "$X,XXX.XX" or null
+    "totalCharges": "Extracted total billed amount as string with $ or null",
+    "insurancePaid": "Amount paid by insurance or credits as string with $ or null",
+    "patientResponsibility": "Final amount owed as string with $ or null"
   },
-  "potentialSavings": "$X,XXX–$Y,YYY possible savings" or null,
-  "explanation": "Clear explanation in 2-3 sentences",
-  "redFlags": [] or list,
-  "services": [] or list,
-  "nextSteps": [] or list
+  "services": ["Short list of main items/services or null"],
+  "redFlags": ["Potential issues, errors, or overcharges (empty array if none)"],
+  "potentialSavings": "Estimated savings range (e.g. '$50–$200') or null",
+  "explanation": "Clear, calm explanation in 2-4 short paragraphs breaking down the bill lingo",
+  "nextSteps": ["Ranked actionable steps to understand or dispute the bill"]
 }
-Use null if unsure.`;
+
+Be conservative with estimates. Use null if unsure. For paid users, provide more detailed savings and red flags.`;
           const [openaiRes, geminiRes] = await Promise.allSettled([
             fetchWithTimeout("https://api.openai.com/v1/chat/completions", {
               method: "POST",
               headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
-              body: JSON.stringify({ model: openModel, messages: [{ role: "user", content: prompt }], temperature: 0, max_tokens: 600 }),
+              body: JSON.stringify({ model: openModel, messages: [{ role: "user", content: prompt }], temperature: 0, max_tokens: isPaid ? 1200 : 300 }),
             }),
             fetchWithTimeout(`https://generativelanguage.googleapis.com/v1beta/models/${gemModel}:generateContent?key=${env.GEMINI_API_KEY}`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: { temperature: 0, maxOutputTokens: 600 } }),
+              body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: { temperature: 0, maxOutputTokens: isPaid ? 1200 : 300 } }),
             }),
           ]);
           const results = [];
@@ -208,15 +232,16 @@ Use null if unsure.`;
         let explanation = aiResult?.explanation || "";
         if (!explanation || explanation.length < 50) {
           if (totalCharges || insurancePaid || patientDue) {
-            explanation = "We successfully extracted key amounts using reliable patterns from your bill.";
+            explanation = "We extracted key amounts using common bill patterns.";
           } else if (text.length > 100) {
-            explanation = "We read text from your bill but couldn't identify standard amount labels. The format may be non-standard — try uploading the page with 'Total Charges' or 'Amount Due'.";
+            explanation = "We read your bill but couldn't find standard amounts. Try the summary page.";
           } else {
-            explanation = "We couldn't extract clear text from your bill. Please try a well-lit, high-resolution photo of the summary page.";
+            explanation = "We couldn't extract clear text. Try a better photo.";
           }
         }
         const finalResult = {
-          summary: aiResult?.summary || "Your medical bill was analyzed.",
+          summary: aiResult?.summary || "Your bill was analyzed.",
+          summaryPoints: aiResult?.summaryPoints || [],
           keyAmounts: {
             totalCharges: aiResult?.keyAmounts?.totalCharges || totalCharges || "Not detected",
             insurancePaid: aiResult?.keyAmounts?.insurancePaid || insurancePaid || "Not detected",
@@ -248,34 +273,7 @@ Use null if unsure.`;
         }), { status: 500, headers: cors });
       }
     }
-    // FRIENDLY ROOT PAGE
-    return new Response(`
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ExplainMyBill API</title>
-  <style>
-    body { font-family: system-ui, sans-serif; text-align: center; padding: 4rem; background: #f8fafc; color: #1e40af; }
-    h1 { font-size: 3rem; margin-bottom: 1rem; }
-    p { font-size: 1.25rem; color: #0369a1; max-width: 600px; margin: 1rem auto; }
-    code { background: #e0f2fe; padding: 0.25rem 0.5rem; border-radius: 0.5rem; }
-    a { color: #1d4ed8; text-decoration: underline; }
-  </style>
-</head>
-<body>
-  <h1>🟢 ExplainMyBill Worker Running</h1>
-  <p>This is the secure backend for <strong>ExplainMyBill</strong>.</p>
-  <p>Frontend: <a href="https://explain-my-bill-frontend.onrender.com" target="_blank">explain-my-bill-frontend.onrender.com</a></p>
-  <p><code>POST /</code> → Upload bill<br><code>POST /create-checkout-session</code> → Upgrade</p>
-  <p>Status: Active • Dec 29, 2025</p>
-</body>
-</html>
-    `, {
-      status: 200,
-      headers: { "Content-Type": "text/html", ...cors },
-    });
+    return new Response("ExplainMyBill Worker – Running", { headers: cors });
   },
 };
 
@@ -312,6 +310,7 @@ async function extractWithGoogleVision(uint8, mimeType, env) {
         }],
       }),
     });
+    if (!res.ok) throw new Error(`Vision API error: ${res.status}`);
     const data = await res.json();
     return data.responses?.[0]?.fullTextAnnotation?.text?.trim() || "";
   } catch (err) {
@@ -357,7 +356,7 @@ function parseResponse(data) {
 
 function mergeResults(results) {
   const merged = {};
-  const fields = ["summary", "explanation", "potentialSavings", "services", "redFlags", "nextSteps", "keyAmounts"];
+  const fields = ["summary", "summaryPoints", "explanation", "potentialSavings", "services", "redFlags", "nextSteps", "keyAmounts"];
   for (const field of fields) {
     for (const result of results) {
       if (result[field] !== null && result[field] !== undefined) {

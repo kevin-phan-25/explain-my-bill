@@ -1,5 +1,5 @@
 // ExplainMyBill Worker – FULL PRODUCTION READY (Dec 29, 2025)
-// Fully preserves OCR, AI explanations, Stripe, Excel, and adds per-service extraction
+// Preserves OCR, AI explanations, Stripe, Excel + adds multi-page structured services
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -119,52 +119,43 @@ export default {
         const u8 = new Uint8Array(buf);
 
         // OCR: Google Vision primary
+        let pages = [];
         try {
           if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
-            const pages = await processExcel(buf);
-            text = pages.map(p => p.rawText).join("\n\n");
+            pages = await processExcel(buf);
           } else if (env.GOOGLE_VISION_API_KEY) {
-            text = await extractWithGoogleVision(u8, file.type, env);
+            const fullText = await extractWithGoogleVision(u8, file.type, env);
+            pages = [{ page: 1, rawText: fullText }];
           }
-          if (!text || text.length < 100) {
-            text = await extractWithOcrSpace(u8, file.type, env);
+          if (!pages || pages.length === 0 || pages[0].rawText.length < 100) {
+            const fallbackText = await extractWithOcrSpace(u8, file.type, env);
+            pages = [{ page: 1, rawText: fallbackText }];
           }
         } catch (err) {
           console.error("OCR failed:", err);
-          text = "We couldn't read your bill. Try a clear, well-lit photo.";
+          pages = [{ page: 1, rawText: "We couldn't read your bill. Try a clear, well-lit photo." }];
         }
 
-        if (!text || text.length < 50) {
-          text = "No readable text found. Use a straight-on photo of the summary page.";
+        if (!pages || pages.length === 0 || pages[0].rawText.length < 50) {
+          pages = [{ page: 1, rawText: "No readable text found. Use a straight-on photo of the summary page." }];
         }
 
-        // ================= EXTRACT KEY AMOUNTS (GLOBAL + PER SERVICE) =================
-        const { totalCharges, insurancePaid, patientResponsibility, services } = extractAmountsPerService(text);
+        // ================= EXTRACT KEY AMOUNTS (MULTI-PAGE) =================
+        pages = pages.map(p => {
+          const { totalCharges, insurancePaid, patientResponsibility, services } = extractAmountsPerService(p.rawText);
+          return { ...p, structured: { totalCharges, insurancePaid, patientResponsibility, services } };
+        });
 
         // ================= AI ANALYSIS =================
         let aiResult = null;
         try {
+          const combinedText = pages.map(p=>p.rawText).join("\n\n");
           const openModel = isPaid ? "gpt-4o" : "gpt-4o-mini";
           const gemModel = isPaid ? "gemini-1.5-pro" : "gemini-1.5-flash";
 
           const prompt = `You are an expert bill analyst. Analyze this extracted text:
-"""${text}"""
-Return ONLY valid JSON:
-{
-  "confidence": 0.0 to 1.0,
-  "summary": "One sentence summary",
-  "summaryPoints": ["Key insight 1"],
-  "keyAmounts": {
-    "totalCharges": "$X,XXX.XX",
-    "insurancePaid": "$X,XXX.XX",
-    "patientResponsibility": "$X,XXX.XX"
-  },
-  "services": ["List of main items"],
-  "redFlags": ["Potential errors"],
-  "potentialSavings": "$X–$Y estimated",
-  "explanation": "2-3 paragraph plain English breakdown",
-  "nextSteps": ["Dispute", "Call provider"]
-}`;
+"""${combinedText}"""
+Return ONLY valid JSON with confidence, summary, keyAmounts, services, redFlags, explanation, nextSteps.`;
 
           const [openaiRes, geminiRes] = await Promise.allSettled([
             fetchWithTimeout("https://api.openai.com/v1/chat/completions", {
@@ -196,28 +187,24 @@ Return ONLY valid JSON:
           console.error("AI failed:", err);
         }
 
-        const explanation = aiResult?.explanation || (totalCharges || insurancePaid || patientResponsibility ? "We extracted key amounts successfully." : "Unable to extract detailed explanation.");
+        const explanation = aiResult?.explanation || "We extracted key amounts successfully.";
 
         const finalResult = {
           summary: aiResult?.summary || "Your bill was analyzed.",
           summaryPoints: aiResult?.summaryPoints || [],
           keyAmounts: {
-            totalCharges: aiResult?.keyAmounts?.totalCharges || totalCharges || "Not detected",
-            insurancePaid: aiResult?.keyAmounts?.insurancePaid || insurancePaid || "Not detected",
-            patientResponsibility: aiResult?.keyAmounts?.patientResponsibility || patientResponsibility || "Not detected"
+            totalCharges: aiResult?.keyAmounts?.totalCharges || pages[0].structured.totalCharges || "Not detected",
+            insurancePaid: aiResult?.keyAmounts?.insurancePaid || pages[0].structured.insurancePaid || "Not detected",
+            patientResponsibility: aiResult?.keyAmounts?.patientResponsibility || pages[0].structured.patientResponsibility || "Not detected"
           },
-          services: aiResult?.services || services || [],
+          services: aiResult?.services || pages.flatMap(p=>p.structured.services) || [],
           redFlags: aiResult?.redFlags || [],
           potentialSavings: isPaid ? (aiResult?.potentialSavings || null) : null,
           explanation,
           nextSteps: aiResult?.nextSteps || ["Double-check amounts","Contact provider","Compare at FairHealthConsumer.org"],
         };
 
-        return new Response(JSON.stringify({
-          isPaid,
-          pages: [{ page:1, rawText:text, structured:finalResult, explanation:finalResult.explanation }],
-          explanation: finalResult.explanation,
-        }), { headers: { "Content-Type": "application/json", ...cors } });
+        return new Response(JSON.stringify({ isPaid, pages, explanation: finalResult.explanation, structured: finalResult }), { headers: { "Content-Type": "application/json", ...cors } });
 
       } catch (err) {
         console.error("Processing failed:", err);
@@ -299,7 +286,7 @@ async function processExcel(buffer){
   }catch(err){ console.error("Excel processing failed:",err); return [{page:1, rawText:"Could not read Excel file."}]; }
 }
 
-// ================= KEY AMOUNT EXTRACTION (GLOBAL + PER SERVICE) =================
+// ================= KEY AMOUNT EXTRACTION (MULTI-PAGE) =================
 function extractAmountsPerService(text){
   const lines = text.split(/\r?\n/).map(l=>l.trim()).filter(l=>l);
   const services = [];

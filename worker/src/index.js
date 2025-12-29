@@ -1,6 +1,8 @@
-// ExplainMyBill Worker – FINAL RELIABLE OCR FIX (Dec 2025)
-// All features preserved + asyncBatchAnnotate for PDFs + retry + enhancement for images
-// Base64 size safe + no quota issues
+// ExplainMyBill Worker – FINAL RELIABLE VERSION (Dec 2025)
+// Removed asyncBatchPDF (it requires GCS + outputConfig, not base64)
+// Back to synchronous files:annotate for PDFs (supports base64 content)
+// Enhanced image OCR with retries + enhancement for better detection on medical bills
+// All features preserved: potentialSavings, dual AI, Stripe, paid/free, Excel
 
 export default {
   async fetch(request, env, ctx) {
@@ -106,20 +108,51 @@ export default {
         let anyTextDetected = false;
 
         // =====================
-        // OCR – Enhanced Reliability
+        // OCR – Synchronous + Enhanced for Images
         // =====================
         if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {
           pages = await processExcel(buffer);
-        } else {
-          // Try enhanced image first for non-PDF
-          let rawText = "";
-          if (!fileName.endsWith(".pdf")) {
-            rawText = await preprocessAndRetryImage(base64, env);
-          } else {
-            // PDF – use asyncBatchAnnotate for better reliability
-            rawText = await asyncBatchPDF(buffer, env);
-          }
+        } else if (fileName.endsWith(".pdf")) {
+          // Synchronous files:annotate for PDFs (supports base64)
+          try {
+            const res = await fetchWithTimeout(
+              `https://vision.googleapis.com/v1/files:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  requests: [
+                    {
+                      inputConfig: {
+                        content: base64,
+                        mimeType: "application/pdf",
+                      },
+                      features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+                      imageContext: { languageHints: ["en"] },
+                      pages: [1, 2, 3, 4, 5],
+                    },
+                  ],
+                }),
+              }
+            );
 
+            const data = await res.json();
+            if (data.error) throw new Error(data.error.message || "Vision PDF error");
+
+            const pageResponses = data.responses?.[0]?.responses || [];
+            pages = pageResponses.length
+              ? pageResponses.map((r, i) => ({
+                  page: i + 1,
+                  rawText: r.fullTextAnnotation?.text || "[No text on this page]",
+                }))
+              : [{ page: 1, rawText: "[No text detected in PDF]" }];
+          } catch (err) {
+            console.error("PDF OCR failed:", err);
+            pages = [{ page: 1, rawText: "[PDF OCR failed – try uploading as JPG/PNG]" }];
+          }
+        } else {
+          // Images – Enhanced with retries
+          const rawText = await preprocessAndRetryImage(base64, env);
           pages = [{ page: 1, rawText }];
         }
 
@@ -239,8 +272,8 @@ Bill text:
 
         if (!anyTextDetected) {
           const noTextMsg = isPaid
-            ? "No readable text was detected in the uploaded bill. This can happen with very dense layouts, watermarks, or low-contrast scans. Try uploading a clearer version or a searchable PDF."
-            : "No readable text detected. Basic analysis complete. Upgrade for advanced processing and support for complex bills.";
+            ? "No readable text was detected. Try uploading a clearer, well-lit JPG/PNG screenshot of the main bill page."
+            : "No readable text detected. Basic analysis complete. Upgrade for advanced processing.";
           fullExplanation = noTextMsg + "\n\n" + fullExplanation;
         }
 
@@ -272,7 +305,7 @@ Bill text:
 };
 
 // =====================
-// HELPERS
+// HELPERS – FULL
 // =====================
 async function fetchWithTimeout(url, options = {}, timeout = 15000) {
   const controller = new AbortController();
@@ -324,11 +357,13 @@ async function preprocessAndRetryImage(base64, env, retries = 4) {
       );
 
       const data = await res.json();
+      if (data.error) throw new Error(data.error.message);
+
       const rawText = data.responses?.[0]?.fullTextAnnotation?.text?.trim() || "";
       if (rawText.length > bestText.length) {
         bestText = rawText;
       }
-      if (bestText.length > 150) {
+      if (bestText.length > 200) {
         return bestText;
       }
     } catch (err) {
@@ -336,7 +371,7 @@ async function preprocessAndRetryImage(base64, env, retries = 4) {
     }
     await new Promise(r => setTimeout(r, 1000));
   }
-  return bestText || "[No text detected after retries]";
+  return bestText || "[No text detected after enhancements]";
 }
 
 async function enhanceImage(base64, filter = "contrast(1.6) brightness(1.2)") {
@@ -348,6 +383,7 @@ async function enhanceImage(base64, filter = "contrast(1.6) brightness(1.2)") {
     const ctx = canvas.getContext("2d");
     ctx.filter = filter;
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    // Unsharp mask
     ctx.globalCompositeOperation = "overlay";
     ctx.globalAlpha = 0.3;
     ctx.drawImage(canvas, 0, 0);
@@ -362,47 +398,4 @@ async function enhanceImage(base64, filter = "contrast(1.6) brightness(1.2)") {
   }
 }
 
-async function asyncBatchPDF(buffer, env) {
-  const base64 = uint8ArrayToBase64(new Uint8Array(buffer));
-  try {
-    const startRes = await fetchWithTimeout(
-      `https://vision.googleapis.com/v1/files:asyncBatchAnnotate?key=${env.GOOGLE_VISION_API_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          requests: [{
-            inputConfig: { content: base64, mimeType: "application/pdf" },
-            features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
-            imageContext: { languageHints: ["en"] },
-          }],
-        }),
-      }
-    );
-
-    if (!startRes.ok) throw new Error("Failed to start PDF OCR");
-
-    const { name: operationName } = await startRes.json();
-
-    for (let i = 0; i < 30; i++) {
-      await new Promise(r => setTimeout(r, 2000));
-      const pollRes = await fetchWithTimeout(
-        `https://vision.googleapis.com/v1/${operationName}?key=${env.GOOGLE_VISION_API_KEY}`
-      );
-
-      const pollData = await pollRes.json();
-      if (pollData.done) {
-        if (pollData.error) throw new Error(pollData.error.message);
-        const responses = pollData.response?.responses || pollData.responses || [];
-        const texts = responses.map(r => r.fullTextAnnotation?.text || "");
-        return texts.join("\n\n");
-      }
-    }
-    throw new Error("PDF OCR timed out");
-  } catch (err) {
-    console.error("PDF OCR failed:", err);
-    return "[PDF OCR failed or timed out]";
-  }
-}
-
-// Keep parseAiResponse, parseGeminiResponse, fallbackStructured, mergeWithConfidence, processExcel unchanged from previous version
+// Keep parseAiResponse, parseGeminiResponse, fallbackStructured, mergeWithConfidence, processExcel unchanged

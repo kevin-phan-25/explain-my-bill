@@ -11,12 +11,14 @@ export default {
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type, X-Dev-Bypass",
     };
+
     if (request.method === "OPTIONS") {
       const h = request.headers.get("Access-Control-Request-Headers");
       if (h) cors["Access-Control-Allow-Headers"] = h;
       return new Response(null, { headers: cors });
     }
-    // STRIPE CHECKOUT
+
+    // STRIPE CHECKOUT – Supports one-time, monthly, lifetime
     if (url.pathname === "/create-checkout-session" && request.method === "POST") {
       try {
         const { plan } = await request.json().catch(() => ({}));
@@ -26,13 +28,19 @@ export default {
             headers: { "Content-Type": "application/json", ...cors },
           });
         }
-        const priceId = plan === "monthly" ? env.STRIPE_PRICE_MONTHLY : plan === "lifetime" ? env.STRIPE_PRICE_LIFETIME : env.STRIPE_PRICE_ONE_TIME;
+
+        let priceId;
+        if (plan === "monthly") priceId = env.STRIPE_PRICE_MONTHLY;
+        else if (plan === "lifetime") priceId = env.STRIPE_PRICE_LIFETIME;
+        else priceId = env.STRIPE_PRICE_ONE_TIME;
+
         if (!priceId) {
           return new Response(JSON.stringify({ error: "Payment configuration error — contact support" }), {
             status: 500,
             headers: { "Content-Type": "application/json", ...cors },
           });
         }
+
         const res = await fetch("https://api.stripe.com/v1/checkout/sessions", {
           method: "POST",
           headers: {
@@ -43,11 +51,12 @@ export default {
             "payment_method_types[0]": "card",
             "line_items[0][price]": priceId,
             "line_items[0][quantity]": "1",
-            mode: plan === "monthly" || plan === "lifetime" ? "subscription" : "payment",  // Lifetime as subscription with no recurring charge
+            mode: plan === "monthly" ? "subscription" : "payment",
             success_url: "https://explain-my-bill-frontend.onrender.com/success?session_id={CHECKOUT_SESSION_ID}",
             cancel_url: "https://explain-my-bill-frontend.onrender.com/cancel",
           }),
         });
+
         const data = await res.json();
         if (!res.ok) {
           console.error("Stripe error:", data);
@@ -56,6 +65,7 @@ export default {
             headers: { "Content-Type": "application/json", ...cors },
           });
         }
+
         return new Response(JSON.stringify({ id: data.id }), {
           headers: { "Content-Type": "application/json", ...cors },
         });
@@ -67,26 +77,31 @@ export default {
         });
       }
     }
+
     // BILL PROCESSING
     if (request.method === "POST") {
       let text = "";
       let isPaid = false;
+
       try {
         const form = await request.formData();
         const file = form.get("bill") || form.get("file");
         const sessionId = form.get("sessionId");
+
         if (!file || file.size === 0) {
           return new Response(JSON.stringify({
             error: "No file uploaded",
             pages: [{ rawText: "Please select a bill to analyze.", structured: { explanation: "No file received." } }],
           }), { status: 400, headers: cors });
         }
+
         if (file.size > 20 * 1024 * 1024) {
           return new Response(JSON.stringify({
             error: "File too large",
             pages: [{ rawText: "File exceeds 20MB. Try a screenshot of the summary page.", structured: { explanation: "File size limit exceeded." } }],
           }), { status: 413, headers: cors });
         }
+
         const name = file.name.toLowerCase();
         const allowed = [".pdf",".png",".jpg",".jpeg",".xlsx",".xls"];
         if (!allowed.some(e => name.endsWith(e))) {
@@ -95,7 +110,8 @@ export default {
             pages: [{ rawText: "Supported: PDF, PNG, JPG, Excel.", structured: { explanation: "Invalid file type." } }],
           }), { status: 415, headers: cors });
         }
-        // Paid check
+
+        // Paid status
         if (sessionId) {
           try {
             const r = await fetchWithTimeout(`https://api.stripe.com/v1/checkout/sessions/${sessionId}`, {
@@ -105,8 +121,10 @@ export default {
             if (r.ok && (d.payment_status === "paid" || d.status === "complete")) isPaid = true;
           } catch {}
         }
+
         const buf = await file.arrayBuffer();
         const u8 = new Uint8Array(buf);
+
         // TEXT EXTRACTION – Google Vision first
         try {
           if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
@@ -124,9 +142,11 @@ export default {
           console.error("OCR failed:", err);
           text = "We couldn't read your bill clearly. Try a better photo.";
         }
+
         if (!text || text.length < 50) {
           text = "No text detected. Try a clear, well-lit photo of the summary page.";
         }
+
         // ULTRA-ROBUST REGEX – handles medical, utility, credit card, etc.
         const getAmount = (patterns) => {
           for (const p of patterns) {
@@ -139,6 +159,7 @@ export default {
           }
           return null;
         };
+
         const totalCharges = getAmount([
           /total\s*(?:charges?|billed|amount|due|balance|cost|fees?|bill|owed)[\s:]*\$?([\d.,]+)/i,
           /amount\s*(?:billed|charged|due|total|owed)[\s:]*\$?([\d.,]+)/i,
@@ -150,6 +171,7 @@ export default {
           /new\s*charges?[\s:]*\$?([\d.,]+)/i,
           /total\s*due[\s:]*\$?([\d.,]+)/i,
         ]);
+
         const insurancePaid = getAmount([
           /insurance\s*(?:paid|payment|adjustment|allowed|credit|reimbursement|benefit|discount)[\s:]*\$?([\d.,]+)/i,
           /paid\s*by\s*insurance[\s:]*\$?([\d.,]+)/i,
@@ -160,6 +182,7 @@ export default {
           /payments?[\s:]*\$?([\d.,]+)/i,
           /credits?[\s:]*\$?([\d.,]+)/i,
         ]);
+
         const patientDue = getAmount([
           /patient\s*(?:responsibility|due|balance|owe|amount\s*due|portion|liability|share|balance\s*due)[\s:]*\$?([\d.,]+)/i,
           /you\s*owe[\s:]*\$?([\d.,]+)/i,
@@ -172,11 +195,13 @@ export default {
           /minimum\s*payment[\s:]*\$?([\d.,]+)/i,
           /due\s*now[\s:]*\$?([\d.,]+)/i,
         ]);
+
         // DUAL AI ANALYSIS – general for any bill type
         let aiResult = null;
         try {
           const openModel = isPaid ? "gpt-4o" : "gpt-4o-mini";
           const gemModel = isPaid ? "gemini-1.5-pro" : "gemini-1.5-flash";
+
           const prompt = `You are an expert bill analyst helping users understand any type of bill (medical, utility, credit card, etc.) in plain English.
 
 Analyze this extracted bill text:
@@ -203,6 +228,7 @@ Return ONLY valid JSON:
 }
 
 Be conservative with estimates. Use null if unsure. For paid users, provide more detailed savings and red flags.`;
+
           const [openaiRes, geminiRes] = await Promise.allSettled([
             fetchWithTimeout("https://api.openai.com/v1/chat/completions", {
               method: "POST",
@@ -215,6 +241,7 @@ Be conservative with estimates. Use null if unsure. For paid users, provide more
               body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: { temperature: 0, maxOutputTokens: isPaid ? 1200 : 300 } }),
             }),
           ]);
+
           const results = [];
           if (openaiRes.status === "fulfilled") {
             const p = parseResponse(await openaiRes.value.json());
@@ -224,10 +251,12 @@ Be conservative with estimates. Use null if unsure. For paid users, provide more
             const p = parseResponse(await geminiRes.value.json());
             if (p) results.push(p);
           }
+
           if (results.length > 0) aiResult = mergeResults(results);
         } catch (err) {
           console.error("AI failed:", err);
         }
+
         // FINAL RESULT
         let explanation = aiResult?.explanation || "";
         if (!explanation || explanation.length < 50) {
@@ -239,6 +268,7 @@ Be conservative with estimates. Use null if unsure. For paid users, provide more
             explanation = "We couldn't extract clear text. Try a better photo.";
           }
         }
+
         const finalResult = {
           summary: aiResult?.summary || "Your bill was analyzed.",
           summaryPoints: aiResult?.summaryPoints || [],
@@ -257,11 +287,13 @@ Be conservative with estimates. Use null if unsure. For paid users, provide more
             "Contact your provider if anything seems off",
           ],
         };
+
         return new Response(JSON.stringify({
           isPaid,
           pages: [{ page: 1, rawText: text, structured: finalResult, explanation: finalResult.explanation }],
           explanation: finalResult.explanation,
         }), { headers: { "Content-Type": "application/json", ...cors } });
+
       } catch (err) {
         console.error("Critical worker error:", err);
         return new Response(JSON.stringify({
@@ -273,7 +305,35 @@ Be conservative with estimates. Use null if unsure. For paid users, provide more
         }), { status: 500, headers: cors });
       }
     }
-    return new Response("ExplainMyBill Worker – Running", { headers: cors });
+
+    // FRIENDLY ROOT PAGE
+    return new Response(`
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>ExplainMyBill API</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: system-ui, sans-serif; text-align: center; padding: 4rem; background: #f8fafc; color: #1e40af; }
+    h1 { font-size: 3rem; margin-bottom: 1rem; }
+    p { font-size: 1.25rem; color: #0369a1; max-width: 600px; margin: 1rem auto; }
+    code { background: #e0f2fe; padding: 0.25rem 0.5rem; border-radius: 0.5rem; }
+    a { color: #1d4ed8; text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <h1>🟢 ExplainMyBill Worker Running</h1>
+  <p>This is the secure backend for <strong>ExplainMyBill</strong>.</p>
+  <p>Frontend: <a href="https://explain-my-bill-frontend.onrender.com" target="_blank">explain-my-bill-frontend.onrender.com</a></p>
+  <p><code>POST /</code> → Upload bill<br><code>POST /create-checkout-session</code> → Upgrade</p>
+  <p>Status: Active • Dec 29, 2025</p>
+</body>
+</html>
+    `, {
+      status: 200,
+      headers: { "Content-Type": "text/html", ...cors },
+    });
   },
 };
 

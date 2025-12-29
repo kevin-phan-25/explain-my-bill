@@ -1,11 +1,9 @@
-// ExplainMyBill Worker – FINAL MERGED & FULLY WORKING (Dec 29, 2025)
-// OCR + Dual AI + Stripe + Excel + robust fallbacks
-// Deploys cleanly — no React/jsPDF/DOM
+// ExplainMyBill Worker – FINAL CONCISE & ROBUST (Dec 29, 2025)
+// OCR + Dual AI + Stripe + Excel – minimal, reliable, production-ready
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-
     const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -13,14 +11,12 @@ export default {
     };
 
     if (request.method === "OPTIONS") {
-      const requestedHeaders = request.headers.get("Access-Control-Request-Headers");
-      if (requestedHeaders) {
-        corsHeaders["Access-Control-Allow-Headers"] = requestedHeaders;
-      }
+      const reqHeaders = request.headers.get("Access-Control-Request-Headers");
+      if (reqHeaders) corsHeaders["Access-Control-Allow-Headers"] = reqHeaders;
       return new Response(null, { headers: corsHeaders });
     }
 
-    // ===================== STRIPE CHECKOUT =====================
+    // STRIPE CHECKOUT
     if (url.pathname === "/create-checkout-session" && request.method === "POST") {
       try {
         const { plan } = await request.json();
@@ -28,7 +24,7 @@ export default {
 
         const priceId = plan === "monthly" ? env.STRIPE_PRICE_MONTHLY : env.STRIPE_PRICE_ONE_TIME;
 
-        const sessionRes = await fetch("https://api.stripe.com/v1/checkout/sessions", {
+        const res = await fetch("https://api.stripe.com/v1/checkout/sessions", {
           method: "POST",
           headers: {
             Authorization: `Bearer ${env.STRIPE_SECRET_KEY}`,
@@ -44,8 +40,8 @@ export default {
           }),
         });
 
-        const data = await sessionRes.json();
-        if (!sessionRes.ok) throw new Error(data.error?.message || "Stripe checkout failed");
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error?.message || "Stripe checkout failed");
 
         return new Response(JSON.stringify({ id: data.id }), {
           headers: { "Content-Type": "application/json", ...corsHeaders },
@@ -58,7 +54,7 @@ export default {
       }
     }
 
-    // ===================== MAIN BILL PROCESSING =====================
+    // MAIN BILL PROCESSING
     if (request.method === "POST") {
       try {
         const formData = await request.formData();
@@ -69,8 +65,8 @@ export default {
         if (billFile.size > 20 * 1024 * 1024) throw new Error("File too large – maximum 20MB");
 
         const fileName = billFile.name.toLowerCase();
-        const allowedExtensions = [".pdf", ".png", ".jpg", ".jpeg", ".xlsx", ".xls"];
-        if (!allowedExtensions.some(ext => fileName.endsWith(ext))) throw new Error("Unsupported file type");
+        const allowed = [".pdf", ".png", ".jpg", ".jpeg", ".xlsx", ".xls"];
+        if (!allowed.some(ext => fileName.endsWith(ext))) throw new Error("Unsupported file type");
 
         let isPaid = false;
         if (sessionId) {
@@ -80,68 +76,47 @@ export default {
             });
             const data = await res.json();
             if (res.ok && (data.payment_status === "paid" || data.status === "complete")) isPaid = true;
-          } catch (e) {}
+          } catch {}
         }
 
         const buffer = await billFile.arrayBuffer();
+        const pages = fileName.endsWith(".xlsx") || fileName.endsWith(".xls")
+          ? await processExcel(buffer)
+          : await preprocessAndRetryImage(buffer, env);
 
-        let pages = [];
-        let anyTextDetected = false;
-
-        // ===================== OCR =====================
-        if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {
-          pages = await processExcel(buffer);
-        } else {
-          pages = await preprocessAndRetryImage(buffer, env);
-        }
-
+        // AI ANALYSIS
         for (const page of pages) {
-          if (page.rawText && page.rawText.trim().length > 20) {
-            anyTextDetected = true;
-          }
-        }
-
-        // ===================== AI ANALYSIS – ROBUST & ALWAYS RUNS =====================
-        for (const page of pages) {
-          const rawText = page.rawText || "";
-
-          if (!rawText || rawText.includes("[No readable text") || rawText.trim().length < 50) {
+          const rawText = page.rawText?.trim() || "";
+          if (rawText.length < 50 || rawText.includes("[No readable text")) {
             page.structured = fallbackStructured(isPaid);
-            page.explanation = "No readable text was detected in the bill. Try uploading a clearer photo or searchable PDF.";
+            page.explanation = "No readable text detected. Try a clearer photo or searchable PDF.";
             continue;
           }
 
           const modelOpenAI = isPaid ? "gpt-4o" : "gpt-4o-mini";
           const modelGemini = isPaid ? "gemini-1.5-pro" : "gemini-1.5-flash";
 
-          const prompt = `You are an expert medical billing analyst.
-
-Here is text extracted from a medical bill:
+          const prompt = `Extract key amounts from this medical bill text:
 
 """${rawText}"""
 
-Extract the key financial amounts. Look for words like:
-- "Total Charges", "Billed Amount", "Gross Charges"
-- "Insurance Paid", "Payment", "Allowed Amount"
-- "Patient Responsibility", "You Owe", "Balance Due", "Amount Due"
-
-Respond with ONLY this valid JSON (no markdown, no extra text):
+Respond with ONLY valid JSON:
 
 {
-  "summary": "Brief summary of the bill",
+  "summary": "Brief summary",
   "keyAmounts": {
     "totalCharges": "$X,XXX.XX" or null,
     "insurancePaid": "$X,XXX.XX" or null,
     "patientResponsibility": "$X,XXX.XX" or null
   },
   "potentialSavings": "$X,XXX–$Y,YYY possible savings" or null,
-  "explanation": "Clear plain-English explanation in 2-3 sentences",
-  "redFlags": [] or list of issues,
-  "services": [] or short list,
-  "nextSteps": [] or ranked steps
+  "explanation": "Clear explanation in 2-3 sentences",
+  "redFlags": [] or issues,
+  "services": [] or list,
+  "nextSteps": [] or steps
 }
 
-If you cannot confidently find a number, use null. Be accurate.`;
+Use null if unsure.`;
 
           let structured = fallbackStructured(isPaid);
 
@@ -149,38 +124,23 @@ If you cannot confidently find a number, use null. Be accurate.`;
             const [openAiRes, geminiRes] = await Promise.allSettled([
               fetchWithTimeout("https://api.openai.com/v1/chat/completions", {
                 method: "POST",
-                headers: {
-                  Authorization: `Bearer ${env.OPENAI_API_KEY}`,
-                  "Content-Type": "application/json",
-                },
-                body: JSON.stringify({
-                  model: modelOpenAI,
-                  messages: [{ role: "user", content: prompt }],
-                  temperature: 0,
-                  max_tokens: isPaid ? 800 : 400,
-                }),
+                headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
+                body: JSON.stringify({ model: modelOpenAI, messages: [{ role: "user", content: prompt }], temperature: 0, max_tokens: isPaid ? 800 : 400 }),
               }),
               fetchWithTimeout(`https://generativelanguage.googleapis.com/v1beta/models/${modelGemini}:generateContent?key=${env.GEMINI_API_KEY}`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  contents: [{ role: "user", parts: [{ text: prompt }] }],
-                  generationConfig: { temperature: 0, maxOutputTokens: isPaid ? 800 : 400 },
-                }),
+                body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: { temperature: 0, maxOutputTokens: isPaid ? 800 : 400 } }),
               }),
             ]);
 
             const results = [];
-
             if (openAiRes.status === "fulfilled") {
-              const data = await openAiRes.value.json();
-              const parsed = parseAiResponse(data);
+              const parsed = parseAiResponse(await openAiRes.value.json());
               if (parsed) results.push(parsed);
             }
-
             if (geminiRes.status === "fulfilled") {
-              const data = await geminiRes.value.json();
-              const parsed = parseGeminiResponse(data);
+              const parsed = parseGeminiResponse(await geminiRes.value.json());
               if (parsed) results.push(parsed);
             }
 
@@ -188,7 +148,7 @@ If you cannot confidently find a number, use null. Be accurate.`;
               structured = mergeWithConfidence(...results, isPaid);
             }
           } catch (err) {
-            console.error("AI processing failed:", err);
+            console.error("AI failed:", err);
           }
 
           page.structured = structured;
@@ -203,7 +163,7 @@ If you cannot confidently find a number, use null. Be accurate.`;
             page: p.page,
             structured: p.structured,
             explanation: p.explanation,
-            rawText: p.rawText  // For frontend OCR fallback
+            rawText: p.rawText
           })),
           explanation: fullExplanation || "Analysis complete.",
         }), {
@@ -222,22 +182,21 @@ If you cannot confidently find a number, use null. Be accurate.`;
   },
 };
 
-// ===================== ALL HELPERS =====================
-async function fetchWithTimeout(url, options = {}, timeout = 15000) {
+// HELPERS
+async function fetchWithTimeout(url, opts = {}, timeout = 15000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
   try {
-    return await fetch(url, { ...options, signal: controller.signal });
+    return await fetch(url, { ...opts, signal: controller.signal });
   } finally {
     clearTimeout(id);
   }
 }
 
-function uint8ArrayToBase64(uint8Array) {
-  const CHUNK_SIZE = 0x8000;
+function uint8ArrayToBase64(arr) {
   let binary = '';
-  for (let i = 0; i < uint8Array.length; i += CHUNK_SIZE) {
-    binary += String.fromCharCode(...uint8Array.subarray(i, i + CHUNK_SIZE));
+  for (let i = 0; i < arr.length; i += 0x8000) {
+    binary += String.fromCharCode(...arr.subarray(i, i + 0x8000));
   }
   return btoa(binary);
 }
@@ -247,9 +206,7 @@ function parseAiResponse(data) {
     let content = data.choices?.[0]?.message?.content || "";
     content = content.replace(/^```json\n?/i, "").replace(/\n?```$/i, "").trim();
     return JSON.parse(content);
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
 function parseGeminiResponse(data) {
@@ -257,9 +214,7 @@ function parseGeminiResponse(data) {
     const content = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
     const cleaned = content.replace(/^```json\n?/i, "").replace(/\n?```$/i, "").trim();
     return JSON.parse(cleaned);
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
 function fallbackStructured(isPaid) {
@@ -272,42 +227,23 @@ function fallbackStructured(isPaid) {
     redFlags: [],
     potentialSavings: null,
     explanation: isPaid
-      ? "Full analysis completed using dual AI verification."
-      : "Basic analysis complete. Upgrade for detailed breakdown, red flags, and savings estimates.",
-    nextSteps: [
-      "Review your itemized bill carefully",
-      "Compare charges at FairHealthConsumer.org",
-      "Contact your insurance with questions"
-    ],
+      ? "Full analysis completed."
+      : "Basic analysis complete. Upgrade for detailed breakdown and savings estimates.",
+    nextSteps: ["Review itemized bill", "Compare at FairHealthConsumer.org", "Contact insurance"],
   };
 }
 
 function mergeWithConfidence(...results) {
-  const isPaid = results.some(r => r.isPaid); // preserve paid status
-  const fallback = fallbackStructured(isPaid);
+  if (results.length === 0) return fallbackStructured(false);
 
-  if (results.length === 0) return fallback;
-
-  let best = results[0];
-
-  // Simple merge: pick the one with most filled keyAmounts
-  results.forEach(r => {
-    const aCount = Object.values(best.keyAmounts || {}).filter(v => v).length;
-    const bCount = Object.values(r.keyAmounts || {}).filter(v => v).length;
-    if (bCount > aCount) best = r;
+  // Pick result with most filled keyAmounts
+  let best = results.reduce((a, b) => {
+    const aCount = Object.values(a.keyAmounts || {}).filter(v => v).length;
+    const bCount = Object.values(b.keyAmounts || {}).filter(v => v).length;
+    return bCount > aCount ? b : a;
   });
 
-  return {
-    summary: best.summary || fallback.summary,
-    summaryPoints: best.summaryPoints || fallback.summaryPoints,
-    keyAmounts: best.keyAmounts || fallback.keyAmounts,
-    confidences: best.confidences || fallback.confidences,
-    services: best.services || fallback.services,
-    redFlags: best.redFlags || fallback.redFlags,
-    potentialSavings: best.potentialSavings || fallback.potentialSavings,
-    explanation: best.explanation || fallback.explanation,
-    nextSteps: best.nextSteps || fallback.nextSteps,
-  };
+  return best;
 }
 
 async function processExcel(buffer) {
@@ -319,47 +255,31 @@ async function processExcel(buffer) {
   }));
 }
 
-// ENHANCED OCR – MAXIMUM TEXT EXTRACTION
 async function preprocessAndRetryImage(buffer, env) {
-  let bestText = "";
-  const enhancements = [
-    "",
-    "contrast(1.5) brightness(1.2)",
-    "contrast(1.8) brightness(1.3)",
-    "contrast(2.1) brightness(1.4) saturate(1.2)",
-    "contrast(2.4) brightness(1.5)",
-  ];
+  let best = "";
+  const filters = ["", "contrast(1.5) brightness(1.2)", "contrast(1.8) brightness(1.3)", "contrast(2.1) brightness(1.4) saturate(1.2)", "contrast(2.4) brightness(1.5)"];
 
-  for (const filter of enhancements) {
+  for (const filter of filters) {
     try {
       const base64 = filter ? await enhanceImageBuffer(buffer, filter) : uint8ArrayToBase64(new Uint8Array(buffer));
-
       const res = await fetchWithTimeout(`https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          requests: [{
-            image: { content: base64 },
-            features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
-            imageContext: { languageHints: ["en"] },
-          }],
+          requests: [{ image: { content: base64 }, features: [{ type: "DOCUMENT_TEXT_DETECTION" }], imageContext: { languageHints: ["en"] } }],
         }),
       });
-
       const data = await res.json();
       if (data.error) continue;
-
       const text = data.responses?.[0]?.fullTextAnnotation?.text?.trim() || "";
-      if (text.length > bestText.length) {
-        bestText = text;
-      }
-      if (bestText.length > 200) break;
+      if (text.length > best.length) best = text;
+      if (best.length > 200) break;
     } catch (err) {
       console.error("OCR attempt failed:", err);
     }
   }
 
-  return [{ page: 1, rawText: bestText || "[No readable text detected – try a clearer photo]" }];
+  return [{ page: 1, rawText: best || "[No readable text detected]" }];
 }
 
 async function enhanceImageBuffer(buffer, filter) {

@@ -1,7 +1,6 @@
 // ExplainMyBill Worker – FINAL PRODUCTION-READY (Dec 29, 2025)
-// Google Vision primary • OCR.space fallback • Dual AI • Ultra-robust regex for any bill type
+// Google Vision primary • OCR.space fallback • Dual AI • Ultra-robust regex for medical + utility bills
 // In-memory only • No data retained • Paid features: savings estimates, red flags, detailed steps
-// Trusted one-stop shop for understanding any bill (medical, utility, credit card, etc.)
 
 export default {
   async fetch(request, env) {
@@ -125,7 +124,7 @@ export default {
         const buf = await file.arrayBuffer();
         const u8 = new Uint8Array(buf);
 
-        // TEXT EXTRACTION – Google Vision first
+        // TEXT EXTRACTION
         try {
           if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
             const pages = await processExcel(buf);
@@ -147,7 +146,7 @@ export default {
           text = "No text detected. Try a clear, well-lit photo of the summary page.";
         }
 
-        // ULTRA-ROBUST REGEX – handles medical, utility, credit card, etc.
+        // ULTRA-ROBUST REGEX – medical + utility bills (electric, gas, water, internet, cable)
         const getAmount = (patterns) => {
           for (const p of patterns) {
             const m = text.match(p);
@@ -161,8 +160,8 @@ export default {
         };
 
         const totalCharges = getAmount([
-          /total\s*(?:charges?|billed|amount|due|balance|cost|fees?|bill|owed)[\s:]*\$?([\d.,]+)/i,
-          /amount\s*(?:billed|charged|due|total|owed)[\s:]*\$?([\d.,]+)/i,
+          /total\s*(?:charges?|billed|amount|due|balance|cost|fees?|bill|owed|usage|service)[\s:]*\$?([\d.,]+)/i,
+          /amount\s*(?:billed|charged|due|total|owed|payable|current)[\s:]*\$?([\d.,]+)/i,
           /gross\s*charges?[\s:]*\$?([\d.,]+)/i,
           /subtotal[\s:]*\$?([\d.,]+)/i,
           /statement\s*balance[\s:]*\$?([\d.,]+)/i,
@@ -170,6 +169,9 @@ export default {
           /previous\s*balance[\s:]*\$?([\d.,]+)/i,
           /new\s*charges?[\s:]*\$?([\d.,]+)/i,
           /total\s*due[\s:]*\$?([\d.,]+)/i,
+          /current\s*charges?[\s:]*\$?([\d.,]+)/i,
+          /service\s*period\s*total[\s:]*\$?([\d.,]+)/i,
+          /billing\s*period\s*total[\s:]*\$?([\d.,]+)/i,
         ]);
 
         const insurancePaid = getAmount([
@@ -181,6 +183,7 @@ export default {
           /plan\s*paid[\s:]*\$?([\d.,]+)/i,
           /payments?[\s:]*\$?([\d.,]+)/i,
           /credits?[\s:]*\$?([\d.,]+)/i,
+          /previous\s*credit[\s:]*\$?([\d.,]+)/i,
         ]);
 
         const patientDue = getAmount([
@@ -194,9 +197,12 @@ export default {
           /please\s*pay\s*this\s*amount[\s:]*\$?([\d.,]+)/i,
           /minimum\s*payment[\s:]*\$?([\d.,]+)/i,
           /due\s*now[\s:]*\$?([\d.,]+)/i,
+          /payment\s*due[\s:]*\$?([\d.,]+)/i,
+          /total\s*amount\s*due[\s:]*\$?([\d.,]+)/i,
+          /pay\s*by[\s:]*\$?([\d.,]+)/i,
         ]);
 
-        // DUAL AI ANALYSIS – general for any bill type
+        // DUAL AI ANALYSIS
         let aiResult = null;
         try {
           const openModel = isPaid ? "gpt-4o" : "gpt-4o-mini";

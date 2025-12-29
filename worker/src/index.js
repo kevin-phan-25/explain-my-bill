@@ -101,11 +101,11 @@ export default {
         if (!allowed.some(e => name.endsWith(e))) {
           return new Response(JSON.stringify({
             error: "Unsupported format",
-            pages: [{ rawText: "Please upload PDF, image, or Excel file.", structured: { explanation: "Invalid file type." } }],
+            pages: [{ rawText: "Supported: PDF, PNG, JPG, Excel.", structured: { explanation: "Invalid file type." } }],
           }), { status: 415, headers: cors });
         }
 
-        // Paid check
+        // Paid status
         if (sessionId) {
           try {
             const r = await fetchWithTimeout(`https://api.stripe.com/v1/checkout/sessions/${sessionId}`, {
@@ -113,40 +113,37 @@ export default {
             });
             const d = await r.json();
             if (r.ok && (d.payment_status === "paid" || d.status === "complete")) isPaid = true;
-          } catch {}
+          } catch (err) {
+            console.error("Paid check failed:", err);
+          }
         }
 
         const buf = await file.arrayBuffer();
         const u8 = new Uint8Array(buf);
 
-        // TEXT EXTRACTION – Google Vision first (best quality)
+        // TEXT EXTRACTION
         try {
           if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
             const pages = await processExcel(buf);
             text = pages.map(p => p.rawText).join("\n\n");
           } else {
-            // Primary: Google Vision (if key exists)
             if (env.GOOGLE_VISION_API_KEY) {
               text = await extractWithGoogleVision(u8, file.type, env);
-              console.log("Vision text length:", text.length);
             }
-
-            // Fallback: OCR.space if Vision failed or returned little text
             if (!text || text.length < 100) {
-              console.log("Falling back to OCR.space");
               text = await extractWithOcrSpace(u8, file.type, env);
             }
           }
         } catch (err) {
-          console.error("All OCR failed:", err);
-          text = "We couldn't extract text from your bill. Please try a clearer, well-lit photo.";
+          console.error("OCR failed:", err);
+          text = "We had trouble reading your bill. Please try a clearer photo.";
         }
 
         if (!text || text.length < 50) {
-          text = "No readable text detected. Try a straight-on, high-resolution photo of the summary page.";
+          text = "No readable text detected. Try a well-lit, straight-on photo of the summary page.";
         }
 
-        // STRONG REGEX EXTRACTION
+        // STRONG REGEX
         const getAmount = (patterns) => {
           for (const p of patterns) {
             const m = text.match(p);
@@ -183,16 +180,14 @@ export default {
           /please\s*pay\s*this\s*amount[\s:]*\$?([\d.,]+)/i,
         ]);
 
-        // DUAL AI ANALYSIS
+        // DUAL AI
         let aiResult = null;
         try {
           const openModel = isPaid ? "gpt-4o" : "gpt-4o-mini";
           const gemModel = isPaid ? "gemini-1.5-pro" : "gemini-1.5-flash";
 
           const prompt = `Extract key information from this medical bill text:
-
 """${text}"""
-
 Return ONLY valid JSON:
 {
   "summary": "One sentence summary",
@@ -207,7 +202,6 @@ Return ONLY valid JSON:
   "services": [] or list,
   "nextSteps": [] or list
 }
-
 Use null if unsure.`;
 
           const [openaiRes, geminiRes] = await Promise.allSettled([
@@ -225,20 +219,22 @@ Use null if unsure.`;
 
           const results = [];
           if (openaiRes.status === "fulfilled") {
-            const parsed = parseResponse(await openaiRes.value.json());
-            if (parsed) results.push(parsed);
+            const p = parseResponse(await openaiRes.value.json());
+            if (p) results.push(p);
           }
           if (geminiRes.status === "fulfilled") {
-            const parsed = parseResponse(await geminiRes.value.json());
-            if (parsed) results.push(parsed);
+            const p = parseResponse(await geminiRes.value.json());
+            if (p) results.push(p);
           }
 
-          if (results.length > 0) aiResult = mergeResults(results);
+          if (results.length > 0) {
+            aiResult = mergeResults(results);
+          }
         } catch (err) {
           console.error("AI analysis failed:", err);
         }
 
-        // FINAL EXPLANATION & RESULT
+        // FINAL RESULT
         let explanation = aiResult?.explanation || "";
         if (!explanation || explanation.length < 50) {
           if (totalCharges || insurancePaid || patientDue) {
@@ -350,7 +346,6 @@ async function extractWithGoogleVision(uint8, mimeType, env) {
         }],
       }),
     });
-
     if (!res.ok) throw new Error(`Vision API error: ${res.status}`);
     const data = await res.json();
     return data.responses?.[0]?.fullTextAnnotation?.text?.trim() || "";
@@ -377,7 +372,6 @@ async function extractWithOcrSpace(uint8, mimeType, env) {
         OCREngine: "2",
       }),
     });
-
     const json = await res.json();
     return json.ParsedResults?.[0]?.ParsedText?.trim() || "";
   } catch (err) {

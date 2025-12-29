@@ -1,6 +1,7 @@
-// ExplainMyBill Worker – FINAL FULLY WORKING CODE (Dec 29, 2025)
-// All features preserved: Stripe, dual AI, potentialSavings, paid/free, Excel
-// OCR: enhanced retry + image preprocessing for reliable text extraction
+// ExplainMyBill Worker – FINAL DEPLOYABLE VERSION (Dec 29, 2025)
+// Pure server-side: OCR + Dual AI + Stripe
+// No React, no jsPDF, no DOM — deploys cleanly
+// Returns rich JSON for frontend to render
 
 export default {
   async fetch(request, env, ctx) {
@@ -83,11 +84,9 @@ export default {
         if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {
           pages = await processExcel(buffer);
         } else {
-          // All non-Excel files go through enhanced image OCR (works great for PDFs too if searchable or clear)
           pages = await preprocessAndRetryImage(buffer, env);
         }
 
-        // Check if any meaningful text was extracted
         for (const page of pages) {
           if (page.rawText && page.rawText.trim().length > 20) {
             anyTextDetected = true;
@@ -182,7 +181,6 @@ Bill text:
             console.error("AI call failed:", aiErr);
           }
 
-          // Always use best available result
           if (openAiParsed || geminiParsed) {
             page.structured = mergeWithConfidence(openAiParsed, geminiParsed, isPaid);
             page.explanation = page.structured.explanation || "Analysis complete.";
@@ -200,7 +198,7 @@ Bill text:
             page: p.page,
             structured: p.structured,
             explanation: p.explanation,
-            rawText: p.rawText // Send raw text for frontend fallback
+            rawText: p.rawText  // Critical for frontend OCR fallback
           })),
           explanation: fullExplanation || "Analysis complete.",
         }), {
@@ -219,7 +217,7 @@ Bill text:
   },
 };
 
-// ===================== ALL HELPERS =====================
+// ===================== HELPERS =====================
 async function fetchWithTimeout(url, options = {}, timeout = 15000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
@@ -336,11 +334,10 @@ async function processExcel(buffer) {
   }));
 }
 
-// ===================== ENHANCED OCR FOR IMAGES & PDFs =====================
 async function preprocessAndRetryImage(buffer, env) {
   let bestText = "";
   const enhancements = [
-    "", // original
+    "",
     "contrast(1.5) brightness(1.2)",
     "contrast(1.8) brightness(1.3)",
     "contrast(2.1) brightness(1.4) saturate(1.2)",
@@ -364,19 +361,17 @@ async function preprocessAndRetryImage(buffer, env) {
       });
 
       const data = await res.json();
-      if (data.error) continue; // skip bad response
+      if (data.error) continue;
 
       const text = data.responses?.[0]?.fullTextAnnotation?.text?.trim() || "";
-      if (text.length > bestText.length) {
-        bestText = text;
-      }
-      if (bestText.length > 200) break; // good enough
+      if (text.length > bestText.length) bestText = text;
+      if (bestText.length > 200) break;
     } catch (err) {
       console.error("OCR attempt failed:", err);
     }
   }
 
-  return [{ page: 1, rawText: bestText || "[No readable text detected – try a clearer photo]" }];
+  return [{ page: 1, rawText: bestText || "[No readable text detected]" }];
 }
 
 async function enhanceImageBuffer(buffer, filter) {
@@ -386,14 +381,11 @@ async function enhanceImageBuffer(buffer, filter) {
   const ctx = canvas.getContext("2d");
   ctx.filter = filter;
   ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-
-  // Unsharp mask
   ctx.globalCompositeOperation = "overlay";
   ctx.globalAlpha = 0.3;
   ctx.drawImage(canvas, 0, 0);
   ctx.globalAlpha = 1;
   ctx.globalCompositeOperation = "source-over";
-
   const blob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.95 });
   const arr = await blob.arrayBuffer();
   return uint8ArrayToBase64(new Uint8Array(arr));

@@ -1,5 +1,5 @@
 // ExplainMyBill Worker – FULL PRODUCTION READY (Dec 29, 2025)
-// Primary: Google Vision OCR • Fallback: OCR.space • Dual AI explanations
+// Fully preserves OCR, AI explanations, Stripe, Excel, and adds per-service extraction
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -125,10 +125,8 @@ export default {
             text = pages.map(p => p.rawText).join("\n\n");
           } else if (env.GOOGLE_VISION_API_KEY) {
             text = await extractWithGoogleVision(u8, file.type, env);
-            console.log("Google Vision extracted:", text.length, "characters");
           }
           if (!text || text.length < 100) {
-            console.log("Fallback to OCR.space");
             text = await extractWithOcrSpace(u8, file.type, env);
           }
         } catch (err) {
@@ -140,8 +138,8 @@ export default {
           text = "No readable text found. Use a straight-on photo of the summary page.";
         }
 
-        // ================= EXTRACT KEY AMOUNTS =================
-        const { totalCharges, insurancePaid, patientResponsibility } = extractAmounts(text);
+        // ================= EXTRACT KEY AMOUNTS (GLOBAL + PER SERVICE) =================
+        const { totalCharges, insurancePaid, patientResponsibility, services } = extractAmountsPerService(text);
 
         // ================= AI ANALYSIS =================
         let aiResult = null;
@@ -206,9 +204,9 @@ Return ONLY valid JSON:
           keyAmounts: {
             totalCharges: aiResult?.keyAmounts?.totalCharges || totalCharges || "Not detected",
             insurancePaid: aiResult?.keyAmounts?.insurancePaid || insurancePaid || "Not detected",
-            patientResponsibility: aiResult?.keyAmounts?.patientResponsibility || patientResponsibility || "Not detected",
+            patientResponsibility: aiResult?.keyAmounts?.patientResponsibility || patientResponsibility || "Not detected"
           },
-          services: aiResult?.services || [],
+          services: aiResult?.services || services || [],
           redFlags: aiResult?.redFlags || [],
           potentialSavings: isPaid ? (aiResult?.potentialSavings || null) : null,
           explanation,
@@ -301,32 +299,38 @@ async function processExcel(buffer){
   }catch(err){ console.error("Excel processing failed:",err); return [{page:1, rawText:"Could not read Excel file."}]; }
 }
 
-// ================= KEY AMOUNT EXTRACTION =================
-function extractAmounts(text){
-  const lines = text.split(/\r?\n/);
-  const joined = [];
-  for(let i=0;i<lines.length;i++){
-    const line=lines[i].trim();
-    const nextLine=(i+1<lines.length?lines[i+1].trim():"");
-    joined.push(line + (/^\$?[\d,.]+$/.test(nextLine)?" "+nextLine:""));
-  }
-  const cleanText = joined.join("\n");
+// ================= KEY AMOUNT EXTRACTION (GLOBAL + PER SERVICE) =================
+function extractAmountsPerService(text){
+  const lines = text.split(/\r?\n/).map(l=>l.trim()).filter(l=>l);
+  const services = [];
+  let current = null;
 
-  const getAmount = (patterns)=>{
-    for(const p of patterns){
-      const m = cleanText.match(p);
-      if(m){
-        let num=m[1].replace(/[^\d.,]/g,"").trim();
-        num=num.replace(/[OolIS]/g,c=>({O:"0",o:"0",l:"1",I:"1",S:"5"}[c]||c));
-        return num?"$"+num:null;
+  for(let i=0;i<lines.length;i++){
+    const l = lines[i];
+    const amtMatch = l.match(/\$?[\d,.]+/);
+    if(/^[0-9]{1,2}\/[0-9]{1,2}\/[0-9]{2,4}/.test(l)){ // Date line
+      if(current) services.push(current);
+      current = { date:l, description:"", charges:"", insurancePaid:"", patientResponsibility:"" };
+    } else if(current){
+      if(amtMatch){
+        if(!current.charges) current.charges = amtMatch[0].replace(/[^\d.,]/g,"");
+        else if(!current.patientResponsibility) current.patientResponsibility = amtMatch[0].replace(/[^\d.,]/g,"");
+      } else {
+        current.description += (current.description?" ":"")+l;
       }
     }
-    return null;
+  }
+  if(current) services.push(current);
+
+  // Aggregate totals
+  const totalCharges = services.reduce((a,s)=>a+(parseFloat(s.charges?.replace(/,/g,""))||0),0);
+  const patientResponsibility = services.reduce((a,s)=>a+(parseFloat(s.patientResponsibility?.replace(/,/g,""))||0),0);
+  const insurancePaid = totalCharges - patientResponsibility;
+
+  return {
+    services,
+    totalCharges: totalCharges?`$${totalCharges.toFixed(2)}`:null,
+    insurancePaid: insurancePaid?`$${insurancePaid.toFixed(2)}`:null,
+    patientResponsibility: patientResponsibility?`$${patientResponsibility.toFixed(2)}`:null
   };
-
-  const totalCharges = getAmount([ /total(?: charges| due| amount| bill)?[\s:]*\$?([\d.,]+)/i, /total\s*\n\s*\$?([\d.,]+)/i ]);
-  const insurancePaid = getAmount([ /insurance(?: paid| adjustment| allowed| credit| reimbursement)?[\s:]*\$?([\d.,]+)/i, /insurance\s*\n\s*\$?([\d.,]+)/i ]);
-  const patientResponsibility = getAmount([ /patient(?: responsibility| due| balance| amount due)?[\s:]*\$?([\d.,]+)/i, /patient\s*\n\s*\$?([\d.,]+)/i ]);
-
-  return { totalCharges, insurancePaid, patientResponsibility };
 }

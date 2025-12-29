@@ -9,13 +9,11 @@ export default {
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type, X-Dev-Bypass",
     };
-
     if (request.method === "OPTIONS") {
       const h = request.headers.get("Access-Control-Request-Headers");
       if (h) cors["Access-Control-Allow-Headers"] = h;
       return new Response(null, { headers: cors });
     }
-
     // STRIPE CHECKOUT
     if (url.pathname === "/create-checkout-session" && request.method === "POST") {
       try {
@@ -26,7 +24,6 @@ export default {
             headers: { "Content-Type": "application/json", ...cors },
           });
         }
-
         const priceId = plan === "monthly" ? env.STRIPE_PRICE_MONTHLY : env.STRIPE_PRICE_ONE_TIME;
         if (!priceId) {
           return new Response(JSON.stringify({ error: "Payment configuration error — contact support" }), {
@@ -34,7 +31,6 @@ export default {
             headers: { "Content-Type": "application/json", ...cors },
           });
         }
-
         const res = await fetch("https://api.stripe.com/v1/checkout/sessions", {
           method: "POST",
           headers: {
@@ -50,7 +46,6 @@ export default {
             cancel_url: "https://explain-my-bill-frontend.onrender.com/cancel",
           }),
         });
-
         const data = await res.json();
         if (!res.ok) {
           console.error("Stripe error:", data);
@@ -59,7 +54,6 @@ export default {
             headers: { "Content-Type": "application/json", ...cors },
           });
         }
-
         return new Response(JSON.stringify({ id: data.id }), {
           headers: { "Content-Type": "application/json", ...cors },
         });
@@ -71,31 +65,26 @@ export default {
         });
       }
     }
-
     // BILL PROCESSING
     if (request.method === "POST") {
       let text = "";
       let isPaid = false;
-
       try {
         const form = await request.formData();
         const file = form.get("bill") || form.get("file");
         const sessionId = form.get("sessionId");
-
         if (!file || file.size === 0) {
           return new Response(JSON.stringify({
             error: "No file uploaded",
             pages: [{ rawText: "Please select a medical bill to analyze.", structured: { explanation: "No file received." } }],
           }), { status: 400, headers: cors });
         }
-
         if (file.size > 20 * 1024 * 1024) {
           return new Response(JSON.stringify({
             error: "File too large",
             pages: [{ rawText: "File exceeds 20MB. Try a screenshot of the summary page.", structured: { explanation: "File size limit exceeded." } }],
           }), { status: 413, headers: cors });
         }
-
         const name = file.name.toLowerCase();
         const allowed = [".pdf",".png",".jpg",".jpeg",".xlsx",".xls"];
         if (!allowed.some(e => name.endsWith(e))) {
@@ -104,8 +93,7 @@ export default {
             pages: [{ rawText: "Supported: PDF, PNG, JPG, Excel.", structured: { explanation: "Invalid file type." } }],
           }), { status: 415, headers: cors });
         }
-
-        // Paid status
+        // Paid check
         if (sessionId) {
           try {
             const r = await fetchWithTimeout(`https://api.stripe.com/v1/checkout/sessions/${sessionId}`, {
@@ -113,15 +101,11 @@ export default {
             });
             const d = await r.json();
             if (r.ok && (d.payment_status === "paid" || d.status === "complete")) isPaid = true;
-          } catch (err) {
-            console.error("Paid check failed:", err);
-          }
+          } catch {}
         }
-
         const buf = await file.arrayBuffer();
         const u8 = new Uint8Array(buf);
-
-        // TEXT EXTRACTION
+        // TEXT EXTRACTION – Google Vision first (best quality)
         try {
           if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
             const pages = await processExcel(buf);
@@ -129,63 +113,55 @@ export default {
           } else {
             if (env.GOOGLE_VISION_API_KEY) {
               text = await extractWithGoogleVision(u8, file.type, env);
+              console.log("Vision text length:", text.length);
             }
+            // Fallback: OCR.space if Vision failed or returned little text
             if (!text || text.length < 100) {
+              console.log("Vision low text — falling back to OCR.space");
               text = await extractWithOcrSpace(u8, file.type, env);
             }
           }
         } catch (err) {
-          console.error("OCR failed:", err);
-          text = "We had trouble reading your bill. Please try a clearer photo.";
+          console.error("All OCR failed:", err);
+          text = "We couldn't extract text from your bill. Please try a clearer, well-lit photo.";
         }
-
         if (!text || text.length < 50) {
-          text = "No readable text detected. Try a well-lit, straight-on photo of the summary page.";
+          text = "No readable text detected. Try a straight-on, high-resolution photo of the summary page.";
         }
-
-        // STRONG REGEX
+        // STRONG REGEX EXTRACTION
         const getAmount = (patterns) => {
           for (const p of patterns) {
             const m = text.match(p);
             if (m) {
-              let num = m[1].replace(/[^\d.,]/g, "").trim();
-              num = num.replace(/[OolIS]/g, c => ({O:"0",o:"0",l:"1",I:"1",S:"5"}[c] || c));
+              const num = m[1].replace(/[^\d.,]/g, "").trim();
               return num ? "$" + num : null;
             }
           }
           return null;
         };
-
         const totalCharges = getAmount([
-          /total\s*(?:charges?|billed|amount|due|balance|cost|fees?)[\s:]*\$?([\d.,]+)/i,
-          /amount\s*(?:billed|charged|due|total|owed)[\s:]*\$?([\d.,]+)/i,
-          /gross\s*charges?[\s:]*\$?([\d.,]+)/i,
-          /subtotal[\s:]*\$?([\d.,]+)/i,
-          /statement\s*balance[\s:]*\$?([\d.,]+)/i,
+          /total\s*(?:charges?|billed|amount|due|billed\s*amount)[\s:]*\$?([\d,]+\.?\d*)/i,
+          /gross\s*charges?[\s:]*\$?([\d,]+\.?\d*)/i,
+          /amount\s*billed[\s:]*\$?([\d,]+\.?\d*)/i,
+          /charges\s*total[\s:]*\$?([\d,]+\.?\d*)/i,
         ]);
-
         const insurancePaid = getAmount([
-          /insurance\s*(?:paid|payment|adjustment|allowed|credit|reimbursement|benefit)[\s:]*\$?([\d.,]+)/i,
-          /paid\s*by\s*insurance[\s:]*\$?([\d.,]+)/i,
-          /contractual\s*(?:adjustment|write.?off|discount|savings)[\s:]*\$?([\d.,]+)/i,
-          /insurance\s*adjustment[\s:]*\$?([\d.,]+)/i,
+          /insurance\s*(?:paid|payment|adjustment)[\s:]*\$?([\d,]+\.?\d*)/i,
+          /paid\s*by\s*insurance[\s:]*\$?([\d,]+\.?\d*)/i,
+          /contractual\s*adjustment[\s:]*\$?([\d,]+\.?\d*)/i,
+          /insurance\s*adjustment[\s:]*\$?([\d,]+\.?\d*)/i,
         ]);
-
         const patientDue = getAmount([
-          /patient\s*(?:responsibility|due|balance|owe|amount\s*due|portion|liability|share)[\s:]*\$?([\d.,]+)/i,
-          /you\s*owe[\s:]*\$?([\d.,]+)/i,
-          /amount\s*due[\s:]*\$?([\d.,]+)/i,
-          /balance\s*due[\s:]*\$?([\d.,]+)/i,
-          /current\s*amount\s*due[\s:]*\$?([\d.,]+)/i,
-          /please\s*pay\s*this\s*amount[\s:]*\$?([\d.,]+)/i,
+          /patient\s*(?:responsibility|due|balance|owe)[\s:]*\$?([\d,]+\.?\d*)/i,
+          /you\s*owe[\s:]*\$?([\d,]+\.?\d*)/i,
+          /amount\s*due[\s:]*\$?([\d,]+\.?\d*)/i,
+          /balance\s*due[\s:]*\$?([\d,]+\.?\d*)/i,
         ]);
-
-        // DUAL AI — FIXED GEMINI ENDPOINT (Dec 2025)
+        // DUAL AI ANALYSIS
         let aiResult = null;
         try {
           const openModel = isPaid ? "gpt-4o" : "gpt-4o-mini";
           const gemModel = isPaid ? "gemini-1.5-pro" : "gemini-1.5-flash";
-
           const prompt = `Extract key information from this medical bill text:
 """${text}"""
 Return ONLY valid JSON:
@@ -203,23 +179,18 @@ Return ONLY valid JSON:
   "nextSteps": [] or list
 }
 Use null if unsure.`;
-
           const [openaiRes, geminiRes] = await Promise.allSettled([
             fetchWithTimeout("https://api.openai.com/v1/chat/completions", {
               method: "POST",
               headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
               body: JSON.stringify({ model: openModel, messages: [{ role: "user", content: prompt }], temperature: 0, max_tokens: 600 }),
             }),
-            fetchWithTimeout(`https://generativelanguage.googleapis.com/v1/models/${gemModel}:generateContent?key=${env.GEMINI_API_KEY}`, {
+            fetchWithTimeout(`https://generativelanguage.googleapis.com/v1beta/models/${gemModel}:generateContent?key=${env.GEMINI_API_KEY}`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                contents: [{ role: "user", parts: [{ text: prompt }] }],
-                generationConfig: { temperature: 0, maxOutputTokens: 600 },
-              }),
+              body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: { temperature: 0, maxOutputTokens: 600 } }),
             }),
           ]);
-
           const results = [];
           if (openaiRes.status === "fulfilled") {
             const p = parseResponse(await openaiRes.value.json());
@@ -229,26 +200,21 @@ Use null if unsure.`;
             const p = parseResponse(await geminiRes.value.json());
             if (p) results.push(p);
           }
-
-          if (results.length > 0) {
-            aiResult = mergeResults(results);
-          }
+          if (results.length > 0) aiResult = mergeResults(results);
         } catch (err) {
-          console.error("AI analysis failed:", err);
+          console.error("AI failed:", err);
         }
-
         // FINAL RESULT
         let explanation = aiResult?.explanation || "";
         if (!explanation || explanation.length < 50) {
           if (totalCharges || insurancePaid || patientDue) {
             explanation = "We successfully extracted key amounts using reliable patterns from your bill.";
           } else if (text.length > 100) {
-            explanation = "We read text from your bill but couldn't identify standard amounts. The format may be non-standard — try uploading just the summary page.";
+            explanation = "We read text from your bill but couldn't identify standard amount labels. The format may be non-standard — try uploading the page with 'Total Charges' or 'Amount Due'.";
           } else {
             explanation = "We couldn't extract clear text from your bill. Please try a well-lit, high-resolution photo of the summary page.";
           }
         }
-
         const finalResult = {
           summary: aiResult?.summary || "Your medical bill was analyzed.",
           keyAmounts: {
@@ -266,13 +232,11 @@ Use null if unsure.`;
             "Contact your provider if anything seems off",
           ],
         };
-
         return new Response(JSON.stringify({
           isPaid,
           pages: [{ page: 1, rawText: text, structured: finalResult, explanation: finalResult.explanation }],
           explanation: finalResult.explanation,
         }), { headers: { "Content-Type": "application/json", ...cors } });
-
       } catch (err) {
         console.error("Critical worker error:", err);
         return new Response(JSON.stringify({
@@ -284,15 +248,14 @@ Use null if unsure.`;
         }), { status: 500, headers: cors });
       }
     }
-
     // FRIENDLY ROOT PAGE
     return new Response(`
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>ExplainMyBill API</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ExplainMyBill API</title>
   <style>
     body { font-family: system-ui, sans-serif; text-align: center; padding: 4rem; background: #f8fafc; color: #1e40af; }
     h1 { font-size: 3rem; margin-bottom: 1rem; }
@@ -349,7 +312,6 @@ async function extractWithGoogleVision(uint8, mimeType, env) {
         }],
       }),
     });
-    if (!res.ok) throw new Error(`Vision API error: ${res.status}`);
     const data = await res.json();
     return data.responses?.[0]?.fullTextAnnotation?.text?.trim() || "";
   } catch (err) {

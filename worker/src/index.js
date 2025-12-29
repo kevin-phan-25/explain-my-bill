@@ -1,4 +1,5 @@
 // ExplainMyBill Worker – FULL PDF-to-Image + Dual AI (Dec 29, 2025)
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -57,13 +58,22 @@ async function handleStripeCheckout(request, env, cors) {
     if (!["monthly", "one-time", "lifetime"].includes(plan)) {
       return errorResponse("Invalid plan selected", 400, cors);
     }
-    const priceMap = { monthly: env.STRIPE_PRICE_MONTHLY, lifetime: env.STRIPE_PRICE_LIFETIME, "one-time": env.STRIPE_PRICE_ONE_TIME };
+
+    const priceMap = {
+      monthly: env.STRIPE_PRICE_MONTHLY,
+      lifetime: env.STRIPE_PRICE_LIFETIME,
+      "one-time": env.STRIPE_PRICE_ONE_TIME,
+    };
+
     const priceId = priceMap[plan];
     if (!priceId) return errorResponse("Payment config error", 500, cors);
 
     const res = await fetch("https://api.stripe.com/v1/checkout/sessions", {
       method: "POST",
-      headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}`, "Content-Type": "application/x-www-form-urlencoded" },
+      headers: {
+        Authorization: `Bearer ${env.STRIPE_SECRET_KEY}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
       body: new URLSearchParams({
         "payment_method_types[0]": "card",
         "line_items[0][price]": priceId,
@@ -77,7 +87,9 @@ async function handleStripeCheckout(request, env, cors) {
     const data = await res.json();
     if (!res.ok) return errorResponse("Stripe error: " + JSON.stringify(data), 502, cors);
 
-    return new Response(JSON.stringify({ id: data.id }), { headers: { "Content-Type": "application/json", ...cors } });
+    return new Response(JSON.stringify({ id: data.id }), {
+      headers: { "Content-Type": "application/json", ...cors },
+    });
   } catch (err) {
     console.error(err);
     return errorResponse("Stripe checkout failed", 500, cors);
@@ -95,15 +107,22 @@ async function handleBillProcessing(request, env, cors) {
     if (file.size > 20 * 1024 * 1024) return errorResponse("File exceeds 20MB", 413, cors);
 
     const name = file.name.toLowerCase();
-    const allowed = [".pdf",".png",".jpg",".jpeg",".xlsx",".xls"];
-    if (!allowed.some(e => name.endsWith(e))) return errorResponse("Unsupported format", 415, cors);
+    const allowed = [".pdf", ".png", ".jpg", ".jpeg", ".xlsx", ".xls"];
+    if (!allowed.some(e => name.endsWith(e))) {
+      return errorResponse("Unsupported format", 415, cors);
+    }
 
     let isPaid = false;
     if (sessionId) {
       try {
-        const r = await fetchWithTimeout(`https://api.stripe.com/v1/checkout/sessions/${sessionId}`, { headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` } });
+        const r = await fetchWithTimeout(
+          `https://api.stripe.com/v1/checkout/sessions/${sessionId}`,
+          { headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` } }
+        );
         const d = await r.json();
-        if (r.ok && (d.payment_status === "paid" || d.status === "complete")) isPaid = true;
+        if (r.ok && (d.payment_status === "paid" || d.status === "complete")) {
+          isPaid = true;
+        }
       } catch {}
     }
 
@@ -116,27 +135,31 @@ async function handleBillProcessing(request, env, cors) {
       text = pages.map(p => p.rawText).join("\n\n");
     } else if (name.endsWith(".pdf")) {
       text = await extractTextFromPDFasImages(u8, env);
-      if (!text || text.length < 100) text = await extractWithOcrSpace(u8, "application/pdf", env);
+      if (!text || text.length < 100) {
+        text = await extractWithOcrSpace(u8, "application/pdf", env);
+      }
     } else {
       text = await extractWithGoogleVision(u8, file.type, env);
-      if (!text || text.length < 100) text = await extractWithOcrSpace(u8, file.type, env);
+      if (!text || text.length < 100) {
+        text = await extractWithOcrSpace(u8, file.type, env);
+      }
     }
 
-    if (!text || text.length < 50) text = "No readable text found. Use a straight-on photo of the summary page.";
+    if (!text || text.length < 50) {
+      text = "No readable text found. Use a straight-on photo of the summary page.";
+    }
 
-    // Extract amounts
-    const totalCharges = extractAmount(text, [/total\s*(?:charges?|billed|amount|due|balance|cost|fees?|bill|owed|usage|statement)[\s:]*\$?([\d.,]+)/i, /amount\s*(?:billed|charged|due|total|owed|payable|current)[\s:]*\$?([\d.,]+)/i]);
-    const insurancePaid = extractAmount(text, [/insurance\s*(?:paid|payment|adjustment|allowed|credit|reimbursement|benefit)[\s:]*\$?([\d.,]+)/i, /paid\s*by\s*insurance[\s:]*\$?([\d.,]+)/i]);
-    const patientDue = extractAmount(text, [/patient\s*(?:responsibility|due|balance|owe|amount\s*due|portion|liability|share)[\s:]*\$?([\d.,]+)/i, /amount\s*due[\s:]*\$?([\d.,]+)/i]);
+    const totalCharges = extractAmount(text, [
+      /total\s*(?:charges?|billed|amount|due|balance|cost|fees?|bill|owed)[\s:]*\$?([\d.,]+)/i,
+    ]);
+    const insurancePaid = extractAmount(text, [
+      /insurance\s*(?:paid|payment|adjustment|allowed|credit|benefit)[\s:]*\$?([\d.,]+)/i,
+    ]);
+    const patientDue = extractAmount(text, [
+      /patient\s*(?:responsibility|due|balance|owe|amount\s*due)[\s:]*\$?([\d.,]+)/i,
+    ]);
 
-    // Dual AI Analysis
     const aiResult = await analyzeWithAI(text, isPaid, env);
-
-    const explanation = aiResult?.explanation || (
-      totalCharges || insurancePaid || patientDue
-        ? "We successfully extracted key amounts using reliable patterns from your bill."
-        : "We couldn't extract clear text from your bill. Please try a well-lit, high-resolution photo of the summary page."
-    );
 
     const finalResult = {
       summary: aiResult?.summary || "Your bill was analyzed.",
@@ -148,16 +171,18 @@ async function handleBillProcessing(request, env, cors) {
       },
       services: aiResult?.services || [],
       redFlags: aiResult?.redFlags || [],
-      potentialSavings: isPaid ? (aiResult?.potentialSavings || null) : null,
-      explanation,
-      nextSteps: aiResult?.nextSteps || ["Double-check amounts on your original bill", "Contact provider to dispute charges", "Compare at FairHealthConsumer.org or your state's rate tool"],
+      potentialSavings: isPaid ? aiResult?.potentialSavings || null : null,
+      explanation: aiResult?.explanation || "Bill analyzed successfully.",
+      nextSteps: aiResult?.nextSteps || [],
     };
 
     return new Response(JSON.stringify({
       isPaid,
-      pages: [{ page: 1, rawText: text, structured: finalResult, explanation: finalResult.explanation }],
+      pages: [{ page: 1, rawText: text, structured: finalResult }],
       explanation: finalResult.explanation,
-    }), { headers: { "Content-Type": "application/json", ...cors } });
+    }), {
+      headers: { "Content-Type": "application/json", ...cors },
+    });
 
   } catch (err) {
     console.error("Critical worker error:", err);
@@ -169,8 +194,7 @@ async function handleBillProcessing(request, env, cors) {
 async function extractTextFromPDFasImages(u8, env) {
   try {
     const pdfjs = await import("https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.222/es5/build/pdf.js");
-    const loadingTask = pdfjs.getDocument({ data: u8 });
-    const pdf = await loadingTask.promise;
+    const pdf = await pdfjs.getDocument({ data: u8 }).promise;
     let fullText = "";
 
     for (let i = 1; i <= pdf.numPages; i++) {
@@ -181,8 +205,11 @@ async function extractTextFromPDFasImages(u8, env) {
       await page.render({ canvasContext: ctx, viewport }).promise;
 
       const blob = await canvas.convertToBlob({ type: "image/png" });
-      const arrayBuffer = await blob.arrayBuffer();
-      const pageText = await extractWithGoogleVision(new Uint8Array(arrayBuffer), "image/png", env);
+      const pageText = await extractWithGoogleVision(
+        new Uint8Array(await blob.arrayBuffer()),
+        "image/png",
+        env
+      );
       fullText += pageText + "\n\n";
     }
 
@@ -193,72 +220,128 @@ async function extractTextFromPDFasImages(u8, env) {
   }
 }
 
-// ======================== Shared Helpers ========================
+// ======================== Helpers ========================
 function errorResponse(msg, status, cors) {
   return new Response(JSON.stringify({
     error: msg,
-    pages: [{ rawText: msg, structured: { explanation: msg } }],
-  }), { status, headers: { "Content-Type": "application/json", ...cors } });
+    pages: [{ rawText: msg }],
+  }), {
+    status,
+    headers: { "Content-Type": "application/json", ...cors },
+  });
 }
 
 function extractAmount(text, patterns) {
   for (const p of patterns) {
     const m = text.match(p);
-    if (m) {
-      let num = m[1].replace(/[^\d.,]/g, "").trim();
-      num = num.replace(/[OolIS]/g, c => ({O:"0",o:"0",l:"1",I:"1",S:"5"}[c] || c));
-      if (num) return "$" + num;
-    }
+    if (m) return "$" + m[1];
   }
   return null;
 }
 
 async function analyzeWithAI(text, isPaid, env) {
   try {
-    const openModel = isPaid ? "gpt-4o" : "gpt-4o-mini";
-    const gemModel = isPaid ? "gemini-1.5-pro" : "gemini-1.5-flash";
-    const prompt = `You are an expert bill analyst. Analyze this extracted text from any type of bill.
-Text:
-"""${text}"""
-Return ONLY valid JSON with summary, keyAmounts, services, redFlags, potentialSavings, explanation, nextSteps.`;
+    const model = isPaid ? "gpt-4o" : "gpt-4o-mini";
+    const prompt = `Analyze this bill text and return JSON only:\n"""${text}"""`;
 
-    const [openaiRes, geminiRes] = await Promise.allSettled([
-      fetchWithTimeout("https://api.openai.com/v1/chat/completions", { method:"POST", headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"}, body: JSON.stringify({model: openModel,messages:[{role:"user",content:prompt}],temperature:0,max_tokens:isPaid?1200:300})}),
-      fetchWithTimeout(`https://generativelanguage.googleapis.com/v1beta/models/${gemModel}:generateContent?key=${env.GEMINI_API_KEY}`, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({contents:[{role:"user",parts:[{text:prompt}]}],generationConfig:{temperature:0,maxOutputTokens:isPaid?1200:300}})}),
-    ]);
-
-    const results = [];
-    if(openaiRes.status==="fulfilled"){const p=parseResponse(await openaiRes.value.json());if(p)results.push({source:"openai",confidence:p.confidence||0.8,data:p});}
-    if(geminiRes.status==="fulfilled"){const p=parseResponse(await geminiRes.value.json());if(p)results.push({source:"gemini",confidence:p.confidence||0.7,data:p});}
-    if(results.length>0){results.sort((a,b)=>b.confidence-a.confidence);return results[0].data;}
-  } catch(e){console.error("AI analysis failed:",e);}
-  return null;
-}
-
-async function extractWithGoogleVision(uint8,mimeType,env){
-  const base64=uint8ArrayToBase64(uint8);
-  try{
-    const res=await fetchWithTimeout(`https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`,{
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({requests:[{image:{content:base64},features:[{type:"DOCUMENT_TEXT_DETECTION",maxResults:1}],imageContext:{languageHints:["en"]}}]})
+    const res = await fetchWithTimeout("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0,
+      }),
     });
-    if(!res.ok){const e=await res.text();throw new Error(`Vision failed: ${res.status} ${e}`);}
-    const data=await res.json();
-    return data.responses?.[0]?.fullTextAnnotation?.text?.trim()||"";
-  }catch(err){console.error("Google Vision failed:",err);return"";}
+
+    const data = await res.json();
+    return parseResponse(data);
+  } catch {
+    return null;
+  }
 }
 
-async function extractWithOcrSpace(uint8,mimeType,env){
-  const base64=uint8ArrayToBase64(uint8);
-  try{
-    const res=await fetch("https://api.ocr.space/parse/image",{method:"POST",headers:{apikey:env.OCR_SPACE_API_KEY,"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams({base64Image:`data:${mimeType};base64,${base64}`,language:"eng",scale:"true",isTable:"true",OCREngine:"2"})});
-    const json=await res.json();
-    return json.ParsedResults?.[0]?.ParsedText?.trim()||"";
-  }catch(e){console.error("OCR.space failed:",e);return"";}
+async function extractWithGoogleVision(uint8, mimeType, env) {
+  const base64 = uint8ArrayToBase64(uint8);
+  try {
+    const res = await fetchWithTimeout(
+      `https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          requests: [{
+            image: { content: base64 },
+            features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+          }],
+        }),
+      }
+    );
+    const data = await res.json();
+    return data.responses?.[0]?.fullTextAnnotation?.text || "";
+  } catch {
+    return "";
+  }
 }
 
-function uint8ArrayToBase64(uint8){let b='';for(let i=0;i<uint8.length;i+=0x8000){b+=String.fromCharCode(...uint8.subarray(i,i+0x8000));}return btoa(b);}
-function parseResponse(data){try{let c=data.choices?.[0]?.message?.content||data.candidates?.[0]?.content?.parts?.[0]?.text||"";c=c.replace(/^```json\n?/i,"").replace(/\n?```$/i,"").trim();return JSON.parse(c);}catch{return null;}}
-async function fetchWithTimeout(url,opts={},timeout=15000){const controller=new AbortController();const id=setTimeout(()=>controller.abort(),timeout);try{return await fetch(url,{...opts,signal:controller.signal});}finally{clearTimeout(id);}}
-async function processExcel(buffer){try{const XLSX=await import("https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm");const wb=XLSX.read(new Uint8Array(buffer),{type:"array"});return wb.SheetNames.map((name,i)=>({page:i+1,rawText:XLSX.utils.sheet_to_csv(wb.Sheets[name])||""}));}catch(err){console.error("Excel failed:",err);return[{page:1,rawText:"Could not read Excel file."}];}
+async function extractWithOcrSpace(uint8, mimeType, env) {
+  const base64 = uint8ArrayToBase64(uint8);
+  const res = await fetch("https://api.ocr.space/parse/image", {
+    method: "POST",
+    headers: {
+      apikey: env.OCR_SPACE_API_KEY,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      base64Image: `data:${mimeType};base64,${base64}`,
+      language: "eng",
+    }),
+  });
+  const json = await res.json();
+  return json.ParsedResults?.[0]?.ParsedText || "";
+}
+
+function uint8ArrayToBase64(uint8) {
+  let s = "";
+  for (let i = 0; i < uint8.length; i += 0x8000) {
+    s += String.fromCharCode(...uint8.subarray(i, i + 0x8000));
+  }
+  return btoa(s);
+}
+
+function parseResponse(data) {
+  try {
+    let c = data.choices?.[0]?.message?.content || "";
+    c = c.replace(/^```json/i, "").replace(/```$/, "").trim();
+    return JSON.parse(c);
+  } catch {
+    return null;
+  }
+}
+
+async function fetchWithTimeout(url, opts = {}, timeout = 15000) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeout);
+  try {
+    return await fetch(url, { ...opts, signal: controller.signal });
+  } finally {
+    clearTimeout(id);
+  }
+}
+
+async function processExcel(buffer) {
+  try {
+    const XLSX = await import("https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm");
+    const wb = XLSX.read(new Uint8Array(buffer), { type: "array" });
+    return wb.SheetNames.map((name, i) => ({
+      page: i + 1,
+      rawText: XLSX.utils.sheet_to_csv(wb.Sheets[name]) || "",
+    }));
+  } catch (err) {
+    console.error("Excel failed:", err);
+    return [{ page: 1, rawText: "Could not read Excel file." }];
+  }
+}

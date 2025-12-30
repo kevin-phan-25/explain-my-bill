@@ -1,9 +1,11 @@
-// ExplainMyBill Worker — FINAL PRODUCTION READY WITH STRIPE + FULL FEATURES (December 30, 2025)
+// ExplainMyBill Worker — FINAL WITH FULL STRIPE HANDLER + ACCESSIBILITY (December 30, 2025)
+// ✅ Full Stripe checkout integration (subscription + one-time)
+// ✅ Developer full access during testing
 // ✅ All power tools live
-// ✅ Stripe checkout fully integrated (test + live ready)
-// ✅ Developer full access during testing (isPaid = isDeveloper)
-// ✅ Expanded overcharge benchmarks (2025 real data)
-// ✅ Nothing removed — every single line preserved and enhanced
+// ✅ Expanded overcharge benchmarks
+// ✅ Nothing removed — every line preserved
+
+import { Stripe } from "stripe";
 
 export default {
   async fetch(request, env) {
@@ -35,7 +37,7 @@ export default {
     }
 
     try {
-      // === STRIPE CHECKOUT ===
+      // === STRIPE CHECKOUT HANDLER (FULLY IMPLEMENTED) ===
       if (url.pathname === "/create-checkout-session" && request.method === "POST") {
         return await handleStripeCheckout(request, env, corsHeaders);
       }
@@ -51,6 +53,9 @@ export default {
               GOOGLE_VISION_API_KEY: !!env.GOOGLE_VISION_API_KEY,
               OCR_SPACE_API_KEY: !!env.OCR_SPACE_API_KEY,
               STRIPE_SECRET_KEY: !!env.STRIPE_SECRET_KEY,
+              STRIPE_PRICE_MONTHLY: !!env.STRIPE_PRICE_MONTHLY,
+              STRIPE_PRICE_LIFETIME: !!env.STRIPE_PRICE_LIFETIME,
+              STRIPE_PRICE_ONE_TIME: !!env.STRIPE_PRICE_ONE_TIME,
             },
           },
           corsHeaders
@@ -89,26 +94,37 @@ export default {
   },
 };
 
-// ======================== STRIPE CHECKOUT (FULLY INTEGRATED) ========================
+// ======================== FULL STRIPE CHECKOUT HANDLER ========================
 async function handleStripeCheckout(request, env, corsHeaders) {
   if (!env.STRIPE_SECRET_KEY) {
-    return errorResponse("Stripe not configured", 500, corsHeaders);
+    return errorResponse("Stripe not configured (missing STRIPE_SECRET_KEY)", 500, corsHeaders);
   }
 
   try {
-    const { priceId, mode = "subscription" } = await request.json();
+    const body = await request.json();
+    const { priceId, mode = "subscription" } = body;
 
     if (!priceId) {
-      return errorResponse("priceId required", 400, corsHeaders);
+      return errorResponse("priceId is required", 400, corsHeaders);
     }
 
-    // Use test keys now — switch to live STRIPE_SECRET_KEY when ready
-    const stripe = Stripe(env.STRIPE_SECRET_KEY, {
+    // Validate priceId against allowed ones (security)
+    const allowedPrices = [
+      env.STRIPE_PRICE_MONTHLY,
+      env.STRIPE_PRICE_LIFETIME,
+      env.STRIPE_PRICE_ONE_TIME,
+    ].filter(Boolean);
+
+    if (!allowedPrices.includes(priceId)) {
+      return errorResponse("Invalid priceId", 400, corsHeaders);
+    }
+
+    const stripe = new Stripe(env.STRIPE_SECRET_KEY, {
       apiVersion: "2023-10-16",
     });
 
     const session = await stripe.checkout.sessions.create({
-      mode: mode,
+      mode: mode === "payment" ? "payment" : "subscription",
       payment_method_types: ["card"],
       line_items: [
         {
@@ -116,14 +132,17 @@ async function handleStripeCheckout(request, env, corsHeaders) {
           quantity: 1,
         },
       ],
-      success_url: "https://yourdomain.com/success?session_id={CHECKOUT_SESSION_ID}",
-      cancel_url: "https://yourdomain.com/cancel",
+      success_url: `${body.successUrl || "https://explain-my-bill-frontend.onrender.com"}/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: body.cancelUrl || "https://explain-my-bill-frontend.onrender.com/cancel",
+      metadata: {
+        user_agent: request.headers.get("user-agent") || "unknown",
+      },
     });
 
     return jsonResponse({ url: session.url }, corsHeaders);
   } catch (err) {
-    console.error("Stripe error:", err);
-    return errorResponse("Checkout failed: " + err.message, 500, corsHeaders);
+    console.error("Stripe checkout error:", err);
+    return errorResponse(`Checkout failed: ${err.message || "Unknown error"}`, 500, corsHeaders);
   }
 }
 
@@ -289,6 +308,32 @@ Sincerely,
 `;
 }
 
+// ======================== OVERCHARGE DETECTION ========================
+async function handleOverchargeDetection(request, env, corsHeaders) {
+  try {
+    const form = await request.formData();
+    const billFile = form.get("bill");
+
+    if (!billFile) return errorResponse("Upload provider bill", 400, corsHeaders);
+
+    const result = await processSingleBill(billFile, env);
+
+    const flags = detectOvercharges(result);
+
+    return jsonResponse(
+      {
+        flags,
+        bill: result,
+        privacyNote: "Document processed in memory only. Nothing stored.",
+      },
+      corsHeaders
+    );
+  } catch (err) {
+    console.error("Overcharge detection error:", err);
+    return errorResponse("Detection failed", 500, corsHeaders);
+  }
+}
+
 // ======================== PRIOR AUTH TRACKER ========================
 async function handlePriorAuth(request, env, corsHeaders) {
   if (request.method === "POST") {
@@ -420,7 +465,7 @@ function compareBills(provider, eob) {
   };
 }
 
-// ======================== ORIGINAL SINGLE BILL PROCESSING (FULLY PRESERVED) ========================
+// ======================== ORIGINAL SINGLE BILL PROCESSING (PRESERVED) ========================
 async function handleBillProcessing(request, env, corsHeaders) {
   try {
     const devBypassHeader = request.headers.get("X-Dev-Bypass") === "true";
@@ -429,7 +474,7 @@ async function handleBillProcessing(request, env, corsHeaders) {
       String(env.DEV_MODE || "").toLowerCase() === "true" ||
       devBypassHeader ||
       (env.DEV_KEY && timingSafeEqual(devKeyHeader, env.DEV_KEY));
-    const isPaid = isDeveloper;
+    const isPaid = isDeveloper; // Full access during testing
     const form = await request.formData();
     const file = form.get("bill") || form.get("file");
     if (!file || file.size === 0) return errorResponse("No file uploaded", 400, corsHeaders);
@@ -1206,6 +1251,3 @@ function timingSafeEqual(a, b) {
   for (let i = 0; i < x.length; i++) out |= x.charCodeAt(i) ^ y.charCodeAt(i);
   return out === 0;
 }
-
-// Required Stripe import (must be at top in actual file)
-import { Stripe } from "stripe";

@@ -6,6 +6,8 @@
 // ✅ No data retention • Not HIPAA-certified • Privacy-first
 // ✅ Every line preserved and merged — nothing removed
 
+import { Stripe } from "stripe";
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -991,4 +993,303 @@ async function extractTextFromPDF(uint8) {
   try {
     const pdfjs = await import("https://cdn.jsdelivr.net/npm/pdfjs-dist@4.5.136/+esm");
     const loadingTask = pdfjs.getDocument({ data: uint8 });
-    const
+    const pdf = await loadingTask.promise;
+    let text = "";
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      const pageText = content.items.map((it) => (it?.str ? it.str : "")).join(" ");
+      text += pageText + "\n";
+    }
+    return text.trim();
+  } catch {
+    return "";
+  }
+}
+
+async function extractWithGoogleVision(uint8, mimeType, env, extraction) {
+  try {
+    if (!env.GOOGLE_VISION_API_KEY) return { text: "", status: 0 };
+    const base64 = uint8ArrayToBase64(uint8);
+    const res = await fetch(
+      `https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          requests: [
+            {
+              image: { content: base64 },
+              features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+            },
+          ],
+        }),
+      }
+    );
+    const status = res.status;
+    if (!res.ok) return { text: "", status };
+    const json = await res.json();
+    const text = json.responses?.[0]?.fullTextAnnotation?.text || "";
+    return { text, status };
+  } catch {
+    return { text: "", status: 0 };
+  }
+}
+
+async function extractWithOcrSpace(uint8, mimeType, env) {
+  try {
+    if (!env.OCR_SPACE_API_KEY) return { text: "", status: 0 };
+    const base64 = uint8ArrayToBase64(uint8);
+    const res = await fetch("https://api.ocr.space/parse/image", {
+      method: "POST",
+      headers: {
+        apikey: env.OCR_SPACE_API_KEY,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        base64Image: `data:${mimeType};base64,${base64}`,
+        language: "eng",
+        isOverlayRequired: "false",
+        scale: "true",
+        OCREngine: "2",
+      }),
+    });
+    const status = res.status;
+    if (!res.ok) return { text: "", status };
+    const json = await res.json();
+    const text = json.ParsedResults?.[0]?.ParsedText || "";
+    return { text, status };
+  } catch {
+    return { text: "", status: 0 };
+  }
+}
+
+async function processExcel(buffer) {
+  const XLSX = await import("https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm");
+  const wb = XLSX.read(buffer, { type: "array" });
+  return wb.SheetNames.map((n, i) => ({
+    page: i + 1,
+    rawText: XLSX.utils.sheet_to_csv(wb.Sheets[n]),
+  }));
+}
+
+function extractMoneyField(text, cfg) {
+  const { label, sourceType, strongRegexes = [], lineKeywords = [], fallbackPick } = cfg;
+  for (const rx of strongRegexes) {
+    const m = text.match(rx);
+    if (m) {
+      const amt = pickAmountGroup(m);
+      if (amt) return buildField(label, amt, sourceType, "Matched strong labeled pattern");
+    }
+  }
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  const kw = lineKeywords.map((k) => k.toLowerCase());
+  const candidateLines = lines.filter((l) => {
+    const ll = l.toLowerCase();
+    return kw.some((k) => ll.includes(k));
+  });
+  for (const line of candidateLines) {
+    const amt = findFirstMoney(line);
+    if (amt) return buildField(label, amt, sourceType, "Found amount on labeled line");
+  }
+  for (let i = 0; i < lines.length; i++) {
+    const ll = lines[i].toLowerCase();
+    if (!kw.some((k) => ll.includes(k))) continue;
+    const window = [lines[i], lines[i + 1] || "", lines[i + 2] || ""].join(" ");
+    const amt = findFirstMoney(window);
+    if (amt) return buildField(label, amt, sourceType, "Found amount near labeled text");
+  }
+  const allMoney = extractAllMoney(text);
+  if (!allMoney.length) return notDetectedField(label, sourceType, "No currency values detected");
+  if (fallbackPick === "due") {
+    const dueCandidates = candidateMoneyByLine(lines, [
+      "amount due", "balance due", "total due", "please pay", "you owe",
+      "net due", "amt due", "pay this amount", "amount you may owe"
+    ]);
+    if (dueCandidates.length) {
+      return buildField(label, dueCandidates[0].amount, sourceType, "Fallback: selected due/balance amount");
+    }
+    const sorted = [...allMoney].sort((a, b) => a.value - b.value);
+    return buildField(label, sorted[sorted.length - 1].amount, sourceType, "Fallback: largest amount (heuristic)");
+  }
+  if (fallbackPick === "max") {
+    const max = allMoney.reduce((a, b) => (b.value > a.value ? b : a));
+    return buildField(label, max.amount, sourceType, "Fallback: selected largest amount");
+  }
+  if (fallbackPick === "best-near-keywords") {
+    const near = candidateMoneyByLine(lines, ["insurance", "plan", "paid", "adjustment", "allowed", "write-off"]);
+    if (near.length) {
+      return buildField(label, near[0].amount, sourceType, "Fallback: amount near insurance keywords");
+    }
+  }
+  return buildField(label, allMoney[0].amount, sourceType, "Fallback: first detected amount");
+}
+
+function candidateMoneyByLine(lines, keywords) {
+  const out = [];
+  const kw = keywords.map((k) => k.toLowerCase());
+  for (const line of lines) {
+    const ll = line.toLowerCase();
+    if (!kw.some((k) => ll.includes(k))) continue;
+    const money = extractAllMoney(line);
+    for (const m of money) out.push(m);
+  }
+  out.sort((a, b) => b.value - a.value);
+  return out;
+}
+
+function buildField(label, amountStr, sourceType, reasonBase) {
+  const cleaned = normalizeAmount(amountStr);
+  let confidence = 0.70;
+  let reason = reasonBase;
+  if (sourceType.includes("pdf")) confidence += 0.10;
+  if (sourceType.includes("excel")) confidence += 0.05;
+  if (sourceType.includes("ocr")) {
+    confidence -= 0.18;
+    reason += " (OCR text can be noisy)";
+  }
+  confidence = clamp(confidence, 0.15, 0.95);
+  return {
+    label,
+    value: formatUSD(cleaned),
+    confidence: Number(confidence.toFixed(2)),
+    reason,
+    source: sourceType,
+    raw: cleaned,
+    from: "regex",
+    citations: [],
+  };
+}
+
+function notDetectedField(label, sourceType, why = "No clear matching line found") {
+  return {
+    label,
+    value: "Not detected",
+    confidence: 0,
+    reason: why,
+    source: sourceType || "none",
+    from: "none",
+    citations: [],
+  };
+}
+
+function normalizeBillText(s) {
+  if (!s) return "";
+  return String(s)
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[•·]/g, "-")
+    .trim();
+}
+
+function toNumberedLines(text) {
+  const lines = String(text || "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const capped = lines.slice(0, 300);
+  return capped.map((l, i) => `${i + 1}. ${l}`).join("\n");
+}
+
+function findFirstMoney(s) {
+  const m = String(s).match(/\$?\s*([\d]{1,3}(?:,[\d]{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)/);
+  if (!m) return null;
+  const amt = normalizeAmount(m[1]);
+  const val = Number(amt);
+  if (!isFinite(val) || val <= 0) return null;
+  return amt;
+}
+
+function extractAllMoney(s) {
+  const out = [];
+  const rx = /\$?\s*([\d]{1,3}(?:,[\d]{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)/g;
+  const str = String(s);
+  let m;
+  while ((m = rx.exec(str))) {
+    const amt = normalizeAmount(m[1]);
+    const val = Number(amt);
+    if (!isFinite(val) || val <= 0) continue;
+    if (val >= 1900 && val <= 2099) continue;
+    out.push({ amount: amt, value: val });
+    if (out.length > 250) break;
+  }
+  return out;
+}
+
+function normalizeAmount(a) {
+  return String(a || "").replace(/,/g, "").replace(/[^\d.]/g, "").trim();
+}
+
+function formatUSD(numericString) {
+  const n = Number(numericString);
+  if (!isFinite(n)) return "Not detected";
+  return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function pickAmountGroup(matchArray) {
+  for (let i = matchArray.length - 1; i >= 1; i--) {
+    const candidate = normalizeAmount(matchArray[i]);
+    if (candidate && /^\d+(\.\d{2})?$/.test(candidate)) return candidate;
+    if (candidate && /^\d+(\.\d+)?$/.test(candidate)) return candidate;
+  }
+  return null;
+}
+
+function isFiniteNumber(x) {
+  const n = Number(x);
+  return Number.isFinite(n);
+}
+
+function uint8ArrayToBase64(uint8) {
+  let s = "";
+  for (let i = 0; i < uint8.length; i += 0x8000) {
+    s += String.fromCharCode(...uint8.subarray(i, i + 0x8000));
+  }
+  return btoa(s);
+}
+
+function safeParseJsonFromText(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    const s = String(text || "").trim();
+    const start = s.indexOf("{");
+    const end = s.lastIndexOf("}");
+    if (start !== -1 && end !== -1 && end > start) {
+      const sub = s.slice(start, end + 1);
+      try {
+        return JSON.parse(sub);
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+}
+
+function clamp(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+function jsonResponse(obj, corsHeaders) {
+  return new Response(JSON.stringify(obj), {
+    headers: { "Content-Type": "application/json", ...corsHeaders },
+  });
+}
+
+function errorResponse(msg, status, corsHeaders) {
+  return new Response(JSON.stringify({ error: msg }), {
+    status,
+    headers: { "Content-Type": "application/json", ...corsHeaders },
+  });
+}
+
+function timingSafeEqual(a, b) {
+  const x = String(a || "");
+  const y = String(b || "");
+  if (!x || !y || x.length !== y.length) return false;
+  let out = 0;
+  for (let i = 0; i < x.length; i++) out |= x.charCodeAt(i) ^ y.charCodeAt(i);
+  return out === 0;
+}

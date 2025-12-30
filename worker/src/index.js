@@ -6,8 +6,6 @@
 // ✅ No data retention • Not HIPAA-certified • Privacy-first
 // ✅ Every line preserved and merged — nothing removed
 
-import { Stripe } from "stripe";
-
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);

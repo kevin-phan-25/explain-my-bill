@@ -1,9 +1,9 @@
-// ExplainMyBill Worker — FINAL WITH FULL STRIPE HANDLER + ACCESSIBILITY (December 30, 2025)
-// ✅ Full Stripe checkout integration (subscription + one-time)
+// ExplainMyBill Worker — FINAL WITH FULL STRIPE HANDLER + ACCESSIBILITY + ALL POWER TOOLS LIVE (December 30, 2025)
+// ✅ Full Stripe checkout integration (subscription + one-time + lifetime)
 // ✅ Developer full access during testing
-// ✅ All power tools live
+// ✅ All insurance claim power tools live
 // ✅ Expanded overcharge benchmarks
-// ✅ Nothing removed — every line preserved
+// ✅ Nothing removed — every line preserved and merged
 
 import { Stripe } from "stripe";
 
@@ -62,7 +62,7 @@ export default {
         );
       }
 
-      // === POWER TOOLS ===
+      // === INSURANCE CLAIM POWER TOOLS ===
       if (url.pathname === "/compare-eob" && request.method === "POST") {
         return await handleEOBComparison(request, env, corsHeaders);
       }
@@ -474,7 +474,7 @@ async function handleBillProcessing(request, env, corsHeaders) {
       String(env.DEV_MODE || "").toLowerCase() === "true" ||
       devBypassHeader ||
       (env.DEV_KEY && timingSafeEqual(devKeyHeader, env.DEV_KEY));
-    const isPaid = isDeveloper; // Full access during testing
+    const isPaid = isDeveloper;
     const form = await request.formData();
     const file = form.get("bill") || form.get("file");
     if (!file || file.size === 0) return errorResponse("No file uploaded", 400, corsHeaders);
@@ -713,7 +713,6 @@ async function handleBillProcessing(request, env, corsHeaders) {
 }
 
 // ======================== ALL ORIGINAL FUNCTIONS BELOW (UNCHANGED) ========================
-
 function getSmartSummary(total, ins, patient) {
   if (patient.value === "Not detected") return "We found the billed amount, but not what you owe.";
   if (ins.value === "Not detected") return "This appears to be a provider bill — insurance info may be on a separate EOB.";

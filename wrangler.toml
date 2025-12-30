@@ -1,17 +1,14 @@
 name = "explain-my-bill"
 main = "worker/src/index.js"
-compatibility_date = "2025-12-29"  # Update to today or later
-compatibility_flags = ["nodejs_compat"]
+compatibility_date = "2025-12-30"  # Always keep this current or today's date
 
-# Add this section for better performance with large modules
-[vars]
-# No vars needed right now
+# Critical for proper file upload handling (File objects instead of corrupted strings)
+compatibility_flags = ["formdata_parser_supports_files"]
 
-# Important for Tesseract.js (wasm files)
-[build]
-command = ""  # No build step needed
+# Optional: Remove nodejs_compat unless you're using Node-specific globals like Buffer, process, etc.
+# If you keep it and have bundle size issues, you can remove it — your code likely doesn't need it.
 
-# Enable these for better debugging (optional but recommended)
+# Keep observability for great debugging in the Cloudflare dashboard
 [observability]
 enabled = true
 
@@ -21,3 +18,7 @@ invocation_logs = true
 
 [observability.traces]
 enabled = true
+
+# No build command needed for plain Workers
+[build]
+command = ""

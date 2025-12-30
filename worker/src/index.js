@@ -214,19 +214,21 @@ function detectOvercharges(billResult) {
   };
 }
 
-// ======================== EOB COMPARISON ========================
+// ======================== EOB COMPARISON (FIXED: NO DUPLICATE "eob") ========================
 async function handleEOBComparison(request, env, corsHeaders) {
   try {
     const form = await request.formData();
-    const providerBill = form.get("providerBill");
-    const eob = form.get("eob");
+    const providerBillFile = form.get("providerBill");
+    const eobFile = form.get("eob");
 
-    if (!providerBill || !eob) {
+    if (!providerBillFile || !eobFile) {
       return errorResponse("Please upload both provider bill and EOB", 400, corsHeaders);
     }
 
-    const providerResult = await processSingleBill(providerBill, env);
-    const eobResult = await processSingleBill(eob, env);
+    const [providerResult, eobResult] = await Promise.all([
+      processSingleBill(providerBillFile, env),
+      processSingleBill(eobFile, env),
+    ]);
 
     const comparison = compareBills(providerResult, eobResult);
 
@@ -258,15 +260,15 @@ async function handleAppealLetter(request, env, corsHeaders) {
     }
 
     const provider = await processSingleBill(providerBill, env);
-    const eob = await processSingleBill(eob, env);
+    const eobResult = await processSingleBill(eob, env);
 
-    const letter = generateAppealLetter(provider, eob, reason);
+    const letter = generateAppealLetter(provider, eobResult, reason);
 
     return jsonResponse(
       {
         letter,
         provider,
-        eob,
+        eob: eobResult,
         privacyNote: "Documents processed in memory only. Nothing stored.",
       },
       corsHeaders

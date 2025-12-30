@@ -153,13 +153,13 @@ function detectOvercharges(billResult) {
 
   const benchmarks = {
     // Emergency & Urgent
-    emergencyRoomVisit: 2800,
+    emergencyRoomVisit: 3000,
     urgentCareVisit: 350,
     primaryCareVisit: 180,
 
     // Imaging
-    mriBrain: 2400,
-    ctHead: 1600,
+    mriBrain: 2500,
+    ctHead: 1700,
     ultrasoundAbdominal: 800,
     xrayChest: 400,
     mammography: 350,
@@ -203,10 +203,10 @@ function detectOvercharges(billResult) {
   };
 
   // Concise, high-impact flags
-  if (total > benchmarks.emergencyRoomVisit * 2) flags.push(`ER visit >2× national average (~$2,800)`);
+  if (total > benchmarks.emergencyRoomVisit * 2) flags.push(`ER visit >2× national average (~$3,000)`);
   if (total > benchmarks.urgentCareVisit * 5) flags.push(`Urgent care appears high (avg ~$350)`);
-  if (total > benchmarks.mriBrain * 2) flags.push(`MRI >2× average (~$2,400)`);
-  if (total > benchmarks.ctHead * 2) flags.push(`CT scan >2× average (~$1,600)`);
+  if (total > benchmarks.mriBrain * 2) flags.push(`MRI >2× average (~$2,500)`);
+  if (total > benchmarks.ctHead * 2) flags.push(`CT scan >2× average (~$1,700)`);
   if (total > benchmarks.hospitalDayGeneral * 5) flags.push(`Hospital stay >5× daily rate (~$4,200/day)`);
   if (total > benchmarks.normalDelivery * 1.5) flags.push(`Delivery charges high (avg ~$18,000)`);
   if (total > benchmarks.cSection * 1.3) flags.push(`C-section elevated (avg ~$25,000)`);
@@ -504,14 +504,18 @@ async function handleBillProcessing(request, env, corsHeaders) {
       devBypassHeader ||
       (env.DEV_KEY && timingSafeEqual(devKeyHeader, env.DEV_KEY));
     const isPaid = isDeveloper;
+
     const form = await request.formData();
     const file = form.get("bill") || form.get("file");
     if (!file || file.size === 0) return errorResponse("No file uploaded", 400, corsHeaders);
     if (file.size > 20 * 1024 * 1024) return errorResponse("File exceeds 20MB", 413, corsHeaders);
+
     const name = (file.name || "").toLowerCase();
     const allowed = [".pdf", ".png", ".jpg", ".jpeg", ".xlsx", ".xls"];
     if (!allowed.some((e) => name.endsWith(e))) return errorResponse("Unsupported format", 415, corsHeaders);
+
     const buffer = new Uint8Array(await file.arrayBuffer());
+
     const extraction = {
       usedOCR: false,
       extractorUsed: "none",
@@ -520,8 +524,10 @@ async function handleBillProcessing(request, env, corsHeaders) {
       fallback: { ok: false, provider: "none", status: null, textLen: 0 },
       textLen: 0,
     };
+
     let rawText = "";
     let sourceType = "unknown";
+
     if (name.endsWith(".pdf")) {
       sourceType = "pdf";
       extraction.sourceType = "pdf";
@@ -546,8 +552,7 @@ async function handleBillProcessing(request, env, corsHeaders) {
         };
         extraction.extractorUsed = rawText ? "ocr_space" : "pdf_text";
       }
-    }
-    else if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
+    } else if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
       sourceType = "excel";
       extraction.sourceType = "excel";
       const pages = await processExcel(buffer);
@@ -559,8 +564,7 @@ async function handleBillProcessing(request, env, corsHeaders) {
         textLen: (rawText || "").length,
       };
       extraction.extractorUsed = "excel_csv";
-    }
-    else {
+    } else {
       sourceType = "image";
       extraction.sourceType = "image";
       const gv = await extractWithGoogleVision(buffer, file.type, env, extraction);
@@ -591,9 +595,11 @@ async function handleBillProcessing(request, env, corsHeaders) {
         }
       }
     }
+
     const text = normalizeBillText(rawText);
     extraction.textLen = text.length;
     const lines = toNumberedLines(text);
+
     if (!text || text.length < 60) {
       const structured = {
         summary: "We could not reliably read text from this document.",
@@ -630,11 +636,14 @@ async function handleBillProcessing(request, env, corsHeaders) {
         corsHeaders
       );
     }
+
     const [openAI, gemini] = await Promise.all([
       analyzeWithOpenAI_AIExtract(lines, isPaid, env),
       analyzeWithGemini_AIExtract(lines, isPaid, env),
     ]);
+
     const aiMerged = mergeAIResults(openAI, gemini);
+
     const regexTotalCharges = extractMoneyField(text, {
       label: "Total Charges",
       sourceType: extraction.sourceType || sourceType,
@@ -648,6 +657,7 @@ async function handleBillProcessing(request, env, corsHeaders) {
       ],
       fallbackPick: "max",
     });
+
     const regexInsurancePaid = extractMoneyField(text, {
       label: "Insurance Paid",
       sourceType: extraction.sourceType || sourceType,
@@ -663,6 +673,7 @@ async function handleBillProcessing(request, env, corsHeaders) {
       ],
       fallbackPick: "best-near-keywords",
     });
+
     const regexPatientDue = extractMoneyField(text, {
       label: "Patient Responsibility",
       sourceType: extraction.sourceType || sourceType,
@@ -677,6 +688,7 @@ async function handleBillProcessing(request, env, corsHeaders) {
       ],
       fallbackPick: "due",
     });
+
     const totalCharges = pickFinalField(
       "Total Charges",
       aiMerged?.fields?.totalCharges,
@@ -695,8 +707,10 @@ async function handleBillProcessing(request, env, corsHeaders) {
       regexPatientDue,
       extraction.sourceType || sourceType
     );
+
     applyCrossAIAmountBoost(openAI, gemini, [totalCharges, insurancePaid, patientResponsibility]);
     applyInTextBoost(text, [totalCharges, insurancePaid, patientResponsibility]);
+
     const structured = {
       summary: aiMerged?.summary || getSmartSummary(totalCharges, insurancePaid, patientResponsibility),
       explanation: aiMerged?.explanation || getCalmExplanation(totalCharges, insurancePaid, patientResponsibility),
@@ -724,6 +738,7 @@ async function handleBillProcessing(request, env, corsHeaders) {
         gemini_ok: !!gemini?.ok,
       },
     };
+
     return jsonResponse(
       {
         isPaid,

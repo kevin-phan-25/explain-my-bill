@@ -6,9 +6,9 @@
 // ✅ No data retention • Not HIPAA-certified • Privacy-first
 // ✅ Every line preserved and merged — nothing removed
 
-// ❗ Cloudflare Workers bundler cannot resolve the Node "stripe" SDK.
-// Keeping the original import line (preserved) but disabling it to prevent build failure.
-// import Stripe from "stripe";
+// NOTE: Cloudflare Workers cannot bundle the Node "stripe" SDK.
+// Keeping a reference line here for clarity, but it MUST NOT be an actual import.
+// import Stripe from "stripe"; // ❌ NOT SUPPORTED IN CLOUDFLARE WORKERS
 
 export default {
   async fetch(request, env) {
@@ -60,6 +60,7 @@ export default {
               STRIPE_PRICE_MONTHLY: !!env.STRIPE_PRICE_MONTHLY,
               STRIPE_PRICE_LIFETIME: !!env.STRIPE_PRICE_LIFETIME,
               STRIPE_PRICE_ONE_TIME: !!env.STRIPE_PRICE_ONE_TIME,
+              DEV_KEY: !!env.DEV_KEY,
             },
           },
           corsHeaders
@@ -96,6 +97,7 @@ export default {
 };
 
 // ======================== FULL STRIPE CHECKOUT HANDLER ========================
+// Cloudflare Worker compatible: call Stripe REST API using fetch (NO Stripe SDK).
 async function handleStripeCheckout(request, env, corsHeaders) {
   if (!env.STRIPE_SECRET_KEY) {
     return errorResponse("Stripe not configured (missing STRIPE_SECRET_KEY)", 500, corsHeaders);
@@ -119,109 +121,54 @@ async function handleStripeCheckout(request, env, corsHeaders) {
       return errorResponse("Invalid priceId", 400, corsHeaders);
     }
 
-    // ✅ Cloudflare Workers-compatible Stripe Checkout creation (NO Node SDK)
-    // Uses Stripe REST API directly via fetch.
     const successBase = body.successUrl || "https://explain-my-bill-frontend.onrender.com";
+    const successUrl = `${successBase}/success?session_id={CHECKOUT_SESSION_ID}`;
     const cancelUrl = body.cancelUrl || "https://explain-my-bill-frontend.onrender.com/cancel";
 
-    const isPayment = mode === "payment";
-    const session = await stripeCreateCheckoutSession(env, request, {
-      mode: isPayment ? "payment" : "subscription",
-      priceId,
-      quantity: 1,
-      success_url: `${successBase}/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: cancelUrl,
-      metadata: {
-        user_agent: request.headers.get("user-agent") || "unknown",
+    // Stripe expects application/x-www-form-urlencoded
+    const form = new URLSearchParams();
+    form.set("mode", mode === "payment" ? "payment" : "subscription");
+    form.set("payment_method_types[0]", "card");
+    form.set("line_items[0][price]", priceId);
+    form.set("line_items[0][quantity]", "1");
+    form.set("success_url", successUrl);
+    form.set("cancel_url", cancelUrl);
+
+    // metadata (safe, non-PII)
+    const ua = request.headers.get("user-agent") || "unknown";
+    form.set("metadata[user_agent]", ua.slice(0, 500));
+
+    const stripeRes = await fetch("https://api.stripe.com/v1/checkout/sessions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.STRIPE_SECRET_KEY}`,
+        "Content-Type": "application/x-www-form-urlencoded",
       },
+      body: form.toString(),
     });
 
-    return jsonResponse({ url: session.url }, corsHeaders);
+    const status = stripeRes.status;
+    const json = await stripeRes.json().catch(() => null);
+
+    if (!stripeRes.ok) {
+      const msg =
+        json?.error?.message ||
+        json?.message ||
+        `Stripe error (HTTP ${status})`;
+      console.error("Stripe checkout error:", msg, json);
+      return errorResponse(`Checkout failed: ${msg}`, 500, corsHeaders);
+    }
+
+    return jsonResponse({ url: json.url }, corsHeaders);
   } catch (err) {
     console.error("Stripe checkout error:", err);
     return errorResponse(`Checkout failed: ${err.message || "Unknown error"}`, 500, corsHeaders);
   }
 }
 
-// ======================== STRIPE REST (WORKERS-SAFE) ========================
-async function stripeCreateCheckoutSession(env, request, input) {
-  const {
-    mode,
-    priceId,
-    quantity,
-    success_url,
-    cancel_url,
-    metadata = {},
-  } = input;
-
-  // Stripe expects application/x-www-form-urlencoded
-  const form = new URLSearchParams();
-
-  // Required
-  form.set("mode", mode);
-  form.set("payment_method_types[0]", "card");
-  form.set("line_items[0][price]", String(priceId));
-  form.set("line_items[0][quantity]", String(quantity || 1));
-  form.set("success_url", success_url);
-  form.set("cancel_url", cancel_url);
-
-  // Optional metadata
-  const metaKeys = Object.keys(metadata || {});
-  for (let i = 0; i < metaKeys.length; i++) {
-    const k = metaKeys[i];
-    const v = metadata[k];
-    if (v === undefined || v === null) continue;
-    form.set(`metadata[${k}]`, String(v).slice(0, 500));
-  }
-
-  // Idempotency key (helps prevent duplicate sessions if client retries)
-  const idem = makeIdempotencyKey(request);
-
-  const res = await fetch("https://api.stripe.com/v1/checkout/sessions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.STRIPE_SECRET_KEY}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-      "Idempotency-Key": idem,
-    },
-    body: form.toString(),
-  });
-
-  const status = res.status;
-  const text = await res.text();
-  let json = null;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    json = null;
-  }
-
-  if (!res.ok) {
-    const msg =
-      (json && (json.error?.message || json.error?.type)) ||
-      `Stripe API error (${status})`;
-    throw new Error(msg);
-  }
-
-  // Stripe returns { id, url, ... }
-  if (!json || !json.url) {
-    throw new Error("Stripe session created but missing session.url");
-  }
-  return json;
-}
-
-function makeIdempotencyKey(request) {
-  // Cheap deterministic-ish key per request without crypto dependency.
-  // (If you want stronger, you can use crypto.subtle.digest, but this is fine for retries.)
-  const ua = request.headers.get("user-agent") || "";
-  const now = Date.now();
-  const rand = Math.floor(Math.random() * 1e9);
-  return `emb_${now}_${rand}_${ua.length}`;
-}
-
 // ======================== MASSIVELY EXPANDED & ACCURATE 2025 OVERCHARGE BENCHMARKS ========================
 function detectOvercharges(billResult) {
-  const total = parseFloat(billResult.structured.keyAmounts.totalCharges.raw || 0);
+  const total = parseFloat(billResult?.structured?.keyAmounts?.totalCharges?.raw || 0);
   const flags = [];
 
   const benchmarks = {
@@ -288,7 +235,7 @@ function detectOvercharges(billResult) {
   if (total > benchmarks.cardiacStent * 1.5) flags.push(`Cardiac stent high (avg ~$38,000)`);
 
   return {
-    totalCharged: billResult.structured.keyAmounts.totalCharges.value,
+    totalCharged: billResult?.structured?.keyAmounts?.totalCharges?.value,
     flags: flags.length > 0 ? flags : ["No major overcharges detected vs national averages"],
     note: "Based on FAIR Health, Medicare, and CMS data (2025 estimates). Not a guarantee.",
   };
@@ -495,24 +442,30 @@ async function processSingleBill(file, env) {
 
   const aiMerged = mergeAIResults(openAI, gemini);
 
+  // --- EOB-SAFE: filter out benefit-balance sections and huge maximums before regex passes ---
+  const amountSearchText = makeAmountSafeText(text);
+
   const totalCharges = pickFinalField(
     "Total Charges",
     aiMerged?.fields?.totalCharges,
-    extractMoneyField(text, { label: "Total Charges", sourceType, fallbackPick: "max" }),
+    extractMoneyField(amountSearchText, { label: "Total Charges", sourceType, fallbackPick: "max" }),
     sourceType
   );
   const insurancePaid = pickFinalField(
     "Insurance Paid",
     aiMerged?.fields?.insurancePaid,
-    extractMoneyField(text, { label: "Insurance Paid", sourceType, fallbackPick: "best-near-keywords" }),
+    extractMoneyField(amountSearchText, { label: "Insurance Paid", sourceType, fallbackPick: "best-near-keywords" }),
     sourceType
   );
   const patientResponsibility = pickFinalField(
     "Patient Responsibility",
     aiMerged?.fields?.patientResponsibility,
-    extractMoneyField(text, { label: "Patient Responsibility", sourceType, fallbackPick: "due" }),
+    extractMoneyField(amountSearchText, { label: "Patient Responsibility", sourceType, fallbackPick: "due" }),
     sourceType
   );
+
+  // --- Hard plausibility checks so we never show terrifying nonsense on EOBs ---
+  enforcePlausibility(amountSearchText, sourceType, totalCharges, insurancePaid, patientResponsibility);
 
   return {
     rawText: text,
@@ -719,7 +672,10 @@ async function handleBillProcessing(request, env, corsHeaders) {
 
     const aiMerged = mergeAIResults(openAI, gemini);
 
-    const regexTotalCharges = extractMoneyField(text, {
+    // EOB-safe text for regex extraction (prevents deductible / OOP max from being misread as amounts due)
+    const amountSearchText = makeAmountSafeText(text);
+
+    const regexTotalCharges = extractMoneyField(amountSearchText, {
       label: "Total Charges",
       sourceType: extraction.sourceType || sourceType,
       lineKeywords: [
@@ -727,7 +683,8 @@ async function handleBillProcessing(request, env, corsHeaders) {
         "statement total", "billed amount", "total amount", "charges",
         "billed charges", "charges total", "total services", "services total",
         "total cost", "cost total", "grand total", "subtotal charges",
-        "original charges", "full charges", "provider billed", "facility charges"
+        "original charges", "full charges", "provider billed", "facility charges",
+        "amount billed", "amount", "billed"
       ],
       strongRegexes: [
         /total\s*(charges?|billed|provider\s*charges|amount\s*billed|statement\s*total)\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
@@ -746,7 +703,7 @@ async function handleBillProcessing(request, env, corsHeaders) {
       fallbackPick: "max",
     });
 
-    const regexInsurancePaid = extractMoneyField(text, {
+    const regexInsurancePaid = extractMoneyField(amountSearchText, {
       label: "Insurance Paid",
       sourceType: extraction.sourceType || sourceType,
       lineKeywords: [
@@ -755,7 +712,8 @@ async function handleBillProcessing(request, env, corsHeaders) {
         "your plan paid", "plan payments", "paid by insurance", "insurance adjustment",
         "payments from plan", "plan allowance", "contractual allowance", "insurance discount",
         "discount from insurance", "paid by plan", "insurer paid", "carrier paid",
-        "benefits paid", "covered amount", "reimbursed amount", "reimbursement"
+        "benefits paid", "covered amount", "reimbursed amount", "reimbursement",
+        "plan payments", "discounts", "payments", "discount"
       ],
       strongRegexes: [
         /(insurance|plan)\s*(paid|payment)\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
@@ -777,7 +735,7 @@ async function handleBillProcessing(request, env, corsHeaders) {
       fallbackPick: "best-near-keywords",
     });
 
-    const regexPatientDue = extractMoneyField(text, {
+    const regexPatientDue = extractMoneyField(amountSearchText, {
       label: "Patient Responsibility",
       sourceType: extraction.sourceType || sourceType,
       lineKeywords: [
@@ -787,25 +745,17 @@ async function handleBillProcessing(request, env, corsHeaders) {
         "amount you owe", "due from patient", "patient amount", "patient pay",
         "patient co-pay", "coinsurance due", "deductible due", "out-of-pocket",
         "patient portion", "your responsibility", "member responsibility",
-        "member balance", "patient owed", "owed by patient", "patient liability"
+        "member balance", "patient owed", "owed by patient", "patient liability",
+        "you may owe", "owe"
       ],
       strongRegexes: [
+        /(amount\s*you\s*(may\s*)?owe|you\s*owe|pay\s*this\s*amount)\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
         /(patient\s*(responsibility|balance|due|owe))\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
-        /(balance\s*due|amount\s*due|total\s*due|net\s*due|amt\s*due|you\s*owe|pay\s*this\s*amount|amount\s*you\s*may\s*owe)\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
-        /amount\s*you\s*owe\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /(balance\s*due|amount\s*due|total\s*due|net\s*due|amt\s*due)\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
         /due\s*from\s*patient\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
-        /patient\s*amount\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
-        /patient\s*pay\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
-        /co-pay\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
-        /coinsurance\s*due\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
-        /deductible\s*due\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
-        /out\s*of\s*pocket\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
         /patient\s*portion\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
         /your\s*responsibility\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
         /member\s*responsibility\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
-        /patient\s*owed\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
-        /owed\s*by\s*patient\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
-        /patient\s*liability\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
       ],
       fallbackPick: "due",
     });
@@ -830,7 +780,10 @@ async function handleBillProcessing(request, env, corsHeaders) {
     );
 
     applyCrossAIAmountBoost(openAI, gemini, [totalCharges, insurancePaid, patientResponsibility]);
-    applyInTextBoost(text, [totalCharges, insurancePaid, patientResponsibility]);
+    applyInTextBoost(amountSearchText, [totalCharges, insurancePaid, patientResponsibility]);
+
+    // Final plausibility guard (prevents scary OOP max showing as what you owe)
+    enforcePlausibility(amountSearchText, extraction.sourceType || sourceType, totalCharges, insurancePaid, patientResponsibility);
 
     const structured = {
       summary: aiMerged?.summary || getSmartSummary(totalCharges, insurancePaid, patientResponsibility),
@@ -1197,6 +1150,8 @@ async function processExcel(buffer) {
 
 function extractMoneyField(text, cfg) {
   const { label, sourceType, strongRegexes = [], lineKeywords = [], fallbackPick } = cfg;
+
+  // Strong matches first
   for (const rx of strongRegexes) {
     const m = text.match(rx);
     if (m) {
@@ -1204,29 +1159,39 @@ function extractMoneyField(text, cfg) {
       if (amt) return buildField(label, amt, sourceType, "Matched strong labeled pattern");
     }
   }
+
+  // Candidate lines by keywords (but avoid benefit balances / max / remaining traps)
   const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
   const kw = lineKeywords.map((k) => k.toLowerCase());
   const candidateLines = lines.filter((l) => {
     const ll = l.toLowerCase();
-    return kw.some((k) => ll.includes(k));
+    if (!kw.some((k) => ll.includes(k))) return false;
+    if (isBenefitBalanceTrapLine(ll)) return false;
+    return true;
   });
+
   for (const line of candidateLines) {
     const amt = findFirstMoney(line);
     if (amt) return buildField(label, amt, sourceType, "Found amount on labeled line");
   }
+
   for (let i = 0; i < lines.length; i++) {
     const ll = lines[i].toLowerCase();
     if (!kw.some((k) => ll.includes(k))) continue;
     const window = [lines[i], lines[i + 1] || "", lines[i + 2] || ""].join(" ");
+    if (isBenefitBalanceTrapLine(window.toLowerCase())) continue;
     const amt = findFirstMoney(window);
     if (amt) return buildField(label, amt, sourceType, "Found amount near labeled text");
   }
+
+  // Fallback heuristics
   const allMoney = extractAllMoney(text);
   if (!allMoney.length) return notDetectedField(label, sourceType, "No currency values detected");
+
   if (fallbackPick === "due") {
     const dueCandidates = candidateMoneyByLine(lines, [
       "amount due", "balance due", "total due", "please pay", "you owe",
-      "net due", "amt due", "pay this amount", "amount you may owe"
+      "net due", "amt due", "pay this amount", "amount you may owe", "amount you owe"
     ]);
     if (dueCandidates.length) {
       return buildField(label, dueCandidates[0].amount, sourceType, "Fallback: selected due/balance amount");
@@ -1234,16 +1199,19 @@ function extractMoneyField(text, cfg) {
     const sorted = [...allMoney].sort((a, b) => a.value - b.value);
     return buildField(label, sorted[sorted.length - 1].amount, sourceType, "Fallback: largest amount (heuristic)");
   }
+
   if (fallbackPick === "max") {
     const max = allMoney.reduce((a, b) => (b.value > a.value ? b : a));
     return buildField(label, max.amount, sourceType, "Fallback: selected largest amount");
   }
+
   if (fallbackPick === "best-near-keywords") {
-    const near = candidateMoneyByLine(lines, ["insurance", "plan", "paid", "adjustment", "allowed", "write-off"]);
+    const near = candidateMoneyByLine(lines, ["insurance", "plan", "paid", "adjustment", "allowed", "write-off", "discount"]);
     if (near.length) {
       return buildField(label, near[0].amount, sourceType, "Fallback: amount near insurance keywords");
     }
   }
+
   return buildField(label, allMoney[0].amount, sourceType, "Fallback: first detected amount");
 }
 
@@ -1253,6 +1221,7 @@ function candidateMoneyByLine(lines, keywords) {
   for (const line of lines) {
     const ll = line.toLowerCase();
     if (!kw.some((k) => ll.includes(k))) continue;
+    if (isBenefitBalanceTrapLine(ll)) continue;
     const money = extractAllMoney(line);
     for (const m of money) out.push(m);
   }
@@ -1315,6 +1284,7 @@ function toNumberedLines(text) {
 }
 
 function findFirstMoney(s) {
+  // Keep permissive matching (OCR/PDF sometimes drops $), but protect against benefit-balance traps elsewhere.
   const m = String(s).match(/\$?\s*([\d]{1,3}(?:,[\d]{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)/);
   if (!m) return null;
   const amt = normalizeAmount(m[1]);
@@ -1332,7 +1302,9 @@ function extractAllMoney(s) {
     const amt = normalizeAmount(m[1]);
     const val = Number(amt);
     if (!isFinite(val) || val <= 0) continue;
-    if (val >= 1900 && val <= 2099) continue;
+    if (val >= 1900 && val <= 2099) continue; // avoid years
+    // Avoid absurd values (still allows large hospital totals, but stops max/out-of-pocket from dominating)
+    if (val > 2500000) continue;
     out.push({ amount: amt, value: val });
     if (out.length > 250) break;
   }
@@ -1414,4 +1386,185 @@ function timingSafeEqual(a, b) {
   let out = 0;
   for (let i = 0; i < x.length; i++) out |= x.charCodeAt(i) ^ y.charCodeAt(i);
   return out === 0;
+}
+
+// ======================== NEW: EOB-SAFE FILTERING + PLAUSIBILITY GUARDS ========================
+
+function looksLikeEOB(text) {
+  const t = String(text || "").toLowerCase();
+  return (
+    t.includes("explanation of benefits") ||
+    t.includes("(eob)") ||
+    t.includes("this is not a bill") ||
+    t.includes("your claims up close") ||
+    t.includes("benefit balances")
+  );
+}
+
+function isBenefitBalanceTrapLine(lowerLine) {
+  const l = String(lowerLine || "").toLowerCase();
+  // These are the exact sections that cause the scary numbers (deductible/OOP max/remaining balances).
+  return (
+    l.includes("benefit balances") ||
+    l.includes("balances to date") ||
+    l.includes("out of pocket") ||
+    l.includes("out-of-pocket") ||
+    l.includes("maximum") ||
+    l.includes("max") && l.includes("pocket") ||
+    l.includes("deductible remaining") ||
+    l.includes("deductible") && l.includes("remaining") ||
+    l.includes("amount used") ||
+    l.includes("amount remaining") ||
+    l.includes("limit") ||
+    l.includes("annual") && l.includes("maximum")
+  );
+}
+
+function makeAmountSafeText(text) {
+  const t = normalizeBillText(text);
+
+  // If not an EOB, do not alter.
+  if (!looksLikeEOB(t)) return t;
+
+  const lines = t.split("\n");
+
+  // Strategy:
+  // - Keep early "payment summary" / "claims up close" sections
+  // - Drop "benefit balances" sections where huge maximums live
+  // - Drop trap lines even if they appear elsewhere
+  const out = [];
+  let inBenefitBalances = false;
+
+  for (const raw of lines) {
+    const l = raw.trim();
+    const ll = l.toLowerCase();
+
+    if (ll.includes("your benefit balances") || ll.includes("benefit balances")) {
+      inBenefitBalances = true;
+    }
+
+    if (inBenefitBalances) {
+      // stop collecting once we enter benefit balances
+      continue;
+    }
+
+    if (isBenefitBalanceTrapLine(ll)) continue;
+
+    out.push(l);
+  }
+
+  // If we accidentally removed too much, fall back to original.
+  const joined = out.join("\n").trim();
+  if (joined.length < Math.min(300, t.length * 0.25)) return t;
+
+  return joined;
+}
+
+function enforcePlausibility(text, sourceType, totalCharges, insurancePaid, patientResponsibility) {
+  // If Total Charges missing, nothing we can confidently clamp against.
+  const t = Number(totalCharges?.raw || 0);
+  if (!isFinite(t) || t <= 0) return;
+
+  // Patient responsibility should not dwarf the total billed on the same doc.
+  const p = Number(patientResponsibility?.raw || 0);
+  if (patientResponsibility?.value !== "Not detected" && isFinite(p) && p > t * 1.25) {
+    // Try to re-pick a smaller "due/owe" candidate from text
+    const bestDue = pickBestDueCandidate(text, t);
+    if (bestDue) {
+      patientResponsibility.value = formatUSD(bestDue);
+      patientResponsibility.raw = String(Number(bestDue).toFixed(2));
+      patientResponsibility.confidence = clamp((patientResponsibility.confidence || 0.6) + 0.1, 0.2, 0.97);
+      patientResponsibility.reason =
+        (patientResponsibility.reason || "Plausibility correction") +
+        " + Corrected: ignored benefit-balance/max numbers and selected amount-you-owe style candidate";
+      patientResponsibility.source = sourceType + "+plausibility";
+      patientResponsibility.from = patientResponsibility.from || "regex";
+    } else {
+      // If we can't find a sane due, do NOT show the scary number.
+      const nd = notDetectedField("Patient Responsibility", sourceType, "Detected value looked like deductible/out-of-pocket max (not what you owe)");
+      patientResponsibility.value = nd.value;
+      patientResponsibility.raw = nd.raw;
+      patientResponsibility.confidence = nd.confidence;
+      patientResponsibility.reason = nd.reason;
+      patientResponsibility.source = nd.source;
+      patientResponsibility.from = nd.from;
+      patientResponsibility.citations = nd.citations;
+    }
+  }
+
+  // Insurance paid should not exceed total charges on most EOB summaries.
+  const i = Number(insurancePaid?.raw || 0);
+  if (insurancePaid?.value !== "Not detected" && isFinite(i) && i > t * 1.5) {
+    const bestIns = pickBestInsuranceCandidate(text, t);
+    if (bestIns) {
+      insurancePaid.value = formatUSD(bestIns);
+      insurancePaid.raw = String(Number(bestIns).toFixed(2));
+      insurancePaid.confidence = clamp((insurancePaid.confidence || 0.6) + 0.08, 0.2, 0.97);
+      insurancePaid.reason =
+        (insurancePaid.reason || "Plausibility correction") +
+        " + Corrected: ignored benefit-balance/max numbers and selected plan-paid/adjustment candidate";
+      insurancePaid.source = sourceType + "+plausibility";
+      insurancePaid.from = insurancePaid.from || "regex";
+    } else {
+      const nd = notDetectedField("Insurance Paid", sourceType, "Detected value looked like benefit-balance/max (not plan payment/discount)");
+      insurancePaid.value = nd.value;
+      insurancePaid.raw = nd.raw;
+      insurancePaid.confidence = nd.confidence;
+      insurancePaid.reason = nd.reason;
+      insurancePaid.source = nd.source;
+      insurancePaid.from = nd.from;
+      insurancePaid.citations = nd.citations;
+    }
+  }
+}
+
+function pickBestDueCandidate(text, totalCharges) {
+  const lines = String(text || "").split("\n").map((x) => x.trim()).filter(Boolean);
+  const dueKeys = [
+    "amount you owe", "you owe", "amount due", "balance due", "pay this amount",
+    "amount you may owe", "patient responsibility", "patient due", "patient balance"
+  ];
+  const candidates = [];
+  for (const line of lines) {
+    const ll = line.toLowerCase();
+    if (isBenefitBalanceTrapLine(ll)) continue;
+    if (!dueKeys.some((k) => ll.includes(k))) continue;
+    const money = extractAllMoney(line);
+    for (const m of money) {
+      const v = m.value;
+      if (v <= 0) continue;
+      if (v > totalCharges * 1.25) continue; // reject scary maxes
+      candidates.push(v);
+    }
+  }
+  if (!candidates.length) return null;
+
+  // Prefer the largest candidate that is still <= total charges (often the actual owe),
+  // but if multiple, this avoids picking tiny copays when "amount you owe" is larger.
+  candidates.sort((a, b) => b - a);
+  return candidates[0].toFixed(2);
+}
+
+function pickBestInsuranceCandidate(text, totalCharges) {
+  const lines = String(text || "").split("\n").map((x) => x.trim()).filter(Boolean);
+  const insKeys = [
+    "plan paid", "insurance paid", "insurance payment", "plan payment",
+    "payments", "discount", "adjustment", "write-off", "contractual", "allowed amount"
+  ];
+  const candidates = [];
+  for (const line of lines) {
+    const ll = line.toLowerCase();
+    if (isBenefitBalanceTrapLine(ll)) continue;
+    if (!insKeys.some((k) => ll.includes(k))) continue;
+    const money = extractAllMoney(line);
+    for (const m of money) {
+      const v = m.value;
+      if (v <= 0) continue;
+      if (v > totalCharges * 1.5) continue;
+      candidates.push(v);
+    }
+  }
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => b - a);
+  return candidates[0].toFixed(2);
 }

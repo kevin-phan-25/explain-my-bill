@@ -6,8 +6,6 @@
 // ✅ No data retention • Not HIPAA-certified • Privacy-first
 // ✅ Every line preserved and merged — nothing removed
 
-// ✅ FIX: Stripe import was missing (Stripe is used below)
-import Stripe from "stripe";
 
 export default {
   async fetch(request, env) {

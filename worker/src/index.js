@@ -1,21 +1,26 @@
-// ExplainMyBill Worker — FULL VERSION (BETTER EXTRACTION + RAW TEXT + AI JSON + DEBUG META)
+// ExplainMyBill Worker — AI-FIRST STRUCTURED EXTRACTION + CITATIONS (keeps regex fallback)
 // Dec 29, 2025
 //
-// ✅ Keeps: Google Vision + OCR.space + OpenAI + Gemini + PDF text extraction + Excel support + Stripe hook
-// ✅ Fixes: wrong amounts by using statement-aware extraction + AI-assisted extraction (no guessing)
-// ✅ Fixes: AI JSON parsing by forcing strict JSON and extracting JSON safely
-// ✅ Always returns rawText + extractionMeta (so you can prove Google Vision vs OCR.space)
-// ✅ Dev always-paid mode (no upgrade prompts in dev)
+// ✅ Keeps: Google Vision + OCR.space + OpenAI + Gemini + PDF text extraction + Excel support + Stripe route
+// ✅ NEW: AI-first extraction returns structured amounts WITH citations (line numbers + evidence text)
+// ✅ Keeps: Regex fallback if AI fails / returns null / missing fields
+// ✅ Dev: ALWAYS-PAID mode (no upgrade prompts for you)
 // ✅ Privacy: no storage, no DB, no login, avoids logging bill text
 //
-// Env vars:
-// - DEV_MODE = "true" (optional)
-// - DEV_KEY  = "some-long-secret" (optional; header X-Dev-Key)
+// ENV VARS (Cloudflare Worker):
+// - DEV_MODE = "true"                // makes ALL requests paid/unlocked (recommended for you)
+// - DEV_KEY = "some-long-secret"     // optional; header bypass: X-Dev-Key: <DEV_KEY>
 // - OPENAI_API_KEY
 // - GEMINI_API_KEY
 // - GOOGLE_VISION_API_KEY
 // - OCR_SPACE_API_KEY
-// - STRIPE_SECRET_KEY (optional for checkout; hook preserved)
+// - STRIPE_SECRET_KEY (optional; only if using checkout)
+//
+// Frontend (for you):
+// - Send header: X-Dev-Bypass: true
+//   OR: X-Dev-Key: <DEV_KEY>
+//
+// IMPORTANT: This is NOT HIPAA-certified. Do NOT claim HIPAA compliance.
 
 export default {
   async fetch(request, env) {
@@ -39,6 +44,24 @@ export default {
         return await handleStripeCheckout(request, env, cors);
       }
 
+      // Debug route: GET /debug (no bill content)
+      if (url.pathname === "/debug" && request.method === "GET") {
+        return jsonResponse(
+          {
+            ok: true,
+            devMode: String(env.DEV_MODE || "").toLowerCase() === "true",
+            hasKeys: {
+              OPENAI_API_KEY: !!env.OPENAI_API_KEY,
+              GEMINI_API_KEY: !!env.GEMINI_API_KEY,
+              GOOGLE_VISION_API_KEY: !!env.GOOGLE_VISION_API_KEY,
+              OCR_SPACE_API_KEY: !!env.OCR_SPACE_API_KEY,
+              STRIPE_SECRET_KEY: !!env.STRIPE_SECRET_KEY,
+            },
+          },
+          cors
+        );
+      }
+
       if (request.method === "POST") {
         return await handleBillProcessing(request, env, cors);
       }
@@ -56,7 +79,7 @@ export default {
 // ======================== BILL PROCESSING ========================
 async function handleBillProcessing(request, env, cors) {
   try {
-    // -------- DEV ALWAYS-PAID MODE --------
+    // -------- DEV ALWAYS-PAID MODE (YOU ARE THE DEVELOPER) --------
     const devBypassHeader = request.headers.get("X-Dev-Bypass") === "true";
     const devKeyHeader = request.headers.get("X-Dev-Key") || "";
     const isDeveloper =
@@ -64,7 +87,6 @@ async function handleBillProcessing(request, env, cors) {
       devBypassHeader ||
       (env.DEV_KEY && timingSafeEqual(devKeyHeader, env.DEV_KEY));
 
-    // Developer sees everything unlocked
     const isPaid = isDeveloper;
 
     const form = await request.formData();
@@ -75,99 +97,117 @@ async function handleBillProcessing(request, env, cors) {
 
     const name = (file.name || "").toLowerCase();
     const allowed = [".pdf", ".png", ".jpg", ".jpeg", ".xlsx", ".xls"];
-    if (!allowed.some((e) => name.endsWith(e))) {
-      return errorResponse("Unsupported format", 415, cors);
-    }
+    if (!allowed.some((e) => name.endsWith(e))) return errorResponse("Unsupported format", 415, cors);
 
     const buffer = new Uint8Array(await file.arrayBuffer());
 
-    let rawText = "";
-    let usedOCR = false;
-    let sourceType = "unknown";
-
-    // extraction debug meta
-    const extractionMeta = {
-      extractorUsed: "none",
+    // Extraction telemetry (safe, no bill content)
+    const extraction = {
       usedOCR: false,
-      primary: null,
-      fallback: null,
+      extractorUsed: "none",
       sourceType: "unknown",
+      primary: { ok: false, provider: "none", status: null, textLen: 0 },
+      fallback: { ok: false, provider: "none", status: null, textLen: 0 },
       textLen: 0,
     };
+
+    let rawText = "";
+    let sourceType = "unknown";
 
     // ---------- PDF ----------
     if (name.endsWith(".pdf")) {
       sourceType = "pdf";
-      extractionMeta.sourceType = sourceType;
+      extraction.sourceType = "pdf";
 
-      const primary = await safeExtractPdfText(buffer);
-      rawText = primary.text;
-      extractionMeta.primary = primary;
-      extractionMeta.extractorUsed = primary.provider;
-      extractionMeta.textLen = (rawText || "").length;
+      rawText = await extractTextFromPDF(buffer);
+      extraction.primary = {
+        ok: !!rawText,
+        provider: "pdf_text",
+        status: rawText ? 200 : 0,
+        textLen: (rawText || "").length,
+      };
+      extraction.extractorUsed = "pdf_text";
 
+      // If weak, fallback to OCR.space
       if (!rawText || rawText.trim().length < 200) {
-        usedOCR = true;
-        sourceType = "pdf+ocr";
-        extractionMeta.sourceType = sourceType;
-        extractionMeta.usedOCR = true;
+        extraction.usedOCR = true;
+        extraction.sourceType = "pdf+ocr";
 
-        const fb = await safeExtractOcrSpace(buffer, "application/pdf", env);
-        rawText = fb.text;
-        extractionMeta.fallback = fb;
-        extractionMeta.extractorUsed = fb.provider;
-        extractionMeta.textLen = (rawText || "").length;
+        const ocr = await extractWithOcrSpace(buffer, "application/pdf", env, extraction);
+        rawText = ocr.text || "";
+        extraction.fallback = {
+          ok: !!rawText,
+          provider: "ocr_space",
+          status: ocr.status,
+          textLen: rawText.length,
+        };
+        extraction.extractorUsed = rawText ? "ocr_space" : "pdf_text";
       }
     }
 
     // ---------- Excel ----------
     else if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
       sourceType = "excel";
-      extractionMeta.sourceType = sourceType;
+      extraction.sourceType = "excel";
 
       const pages = await processExcel(buffer);
       rawText = pages.map((p) => p.rawText).join("\n\n");
-
-      extractionMeta.primary = {
-        ok: true,
-        provider: "excel",
-        status: 200,
-        textLen: rawText.length,
+      extraction.primary = {
+        ok: !!rawText,
+        provider: "excel_csv",
+        status: rawText ? 200 : 0,
+        textLen: (rawText || "").length,
       };
-      extractionMeta.extractorUsed = "excel";
-      extractionMeta.textLen = rawText.length;
+      extraction.extractorUsed = "excel_csv";
     }
 
     // ---------- Image ----------
     else {
       sourceType = "image";
-      extractionMeta.sourceType = sourceType;
+      extraction.sourceType = "image";
 
-      const primary = await safeExtractGoogleVision(buffer, file.type, env);
-      rawText = primary.text;
-      extractionMeta.primary = primary;
-      extractionMeta.extractorUsed = primary.provider;
-      extractionMeta.textLen = (rawText || "").length;
+      const gv = await extractWithGoogleVision(buffer, file.type, env, extraction);
+      rawText = gv.text || "";
+      extraction.primary = {
+        ok: !!rawText,
+        provider: "google_vision",
+        status: gv.status,
+        textLen: rawText.length,
+      };
+      extraction.extractorUsed = rawText ? "google_vision" : "google_vision";
 
-      // Only fallback if Vision is weak or failed
-      if (!rawText || rawText.trim().length < 250) {
-        usedOCR = true;
-        sourceType = "image+ocr";
-        extractionMeta.sourceType = sourceType;
-        extractionMeta.usedOCR = true;
+      // If weak, fallback to OCR.space (kept as fallback)
+      if (!rawText || rawText.trim().length < 200) {
+        extraction.usedOCR = true;
+        extraction.sourceType = "image+ocr";
 
-        const fb = await safeExtractOcrSpace(buffer, file.type, env);
-        rawText = fb.text;
-        extractionMeta.fallback = fb;
-        extractionMeta.extractorUsed = fb.provider;
-        extractionMeta.textLen = (rawText || "").length;
+        const ocr = await extractWithOcrSpace(buffer, file.type, env, extraction);
+        const ocrText = ocr.text || "";
+        extraction.fallback = {
+          ok: !!ocrText,
+          provider: "ocr_space",
+          status: ocr.status,
+          textLen: ocrText.length,
+        };
+
+        // Prefer whichever has more usable text
+        if (ocrText.length > rawText.length) {
+          rawText = ocrText;
+          extraction.extractorUsed = "ocr_space";
+        } else {
+          extraction.extractorUsed = rawText ? "google_vision" : "ocr_space";
+        }
       }
     }
 
     const text = normalizeBillText(rawText);
-    extractionMeta.textLen = text.length;
+    extraction.textLen = text.length;
 
-    // Always return rawText (even if empty)
+    // Always return rawText for trust/debug (you asked for this)
+    // IMPORTANT: This is transient and only returned to the client; not stored.
+    const lines = toNumberedLines(text);
+
+    // If still too little text, return helpful response
     if (!text || text.length < 60) {
       const structured = {
         summary: "We could not reliably read text from this document.",
@@ -175,24 +215,20 @@ async function handleBillProcessing(request, env, cors) {
           "No readable text was detected. Try a clearer photo (flat, bright, no glare) or upload the PDF directly.",
         nextSteps: [
           "Re-scan or take a clearer photo (no glare, full page, straight).",
-          "If PDF: download the text-based PDF from your provider portal.",
-          "Crop out background and re-upload.",
+          "If PDF: export a text-based PDF from the provider portal if available.",
+          "Crop out background and re-upload (only the bill page).",
         ],
         keyAmounts: {
-          totalCharges: notDetectedField("Total Charges", sourceType, "No readable text"),
-          insurancePaid: notDetectedField("Insurance Paid", sourceType, "No readable text"),
-          patientResponsibility: notDetectedField(
-            "Patient Responsibility",
-            sourceType,
-            "No readable text"
-          ),
-          _debug: { label: "_debug", value: "—", confidence: 0, source: sourceType },
+          totalCharges: notDetectedField("Total Charges", sourceType),
+          insurancePaid: notDetectedField("Insurance Paid", sourceType),
+          patientResponsibility: notDetectedField("Patient Responsibility", sourceType),
         },
         confidenceMeta: {
-          sourceType,
-          usedOCR,
+          sourceType: extraction.sourceType || sourceType,
+          usedOCR: extraction.usedOCR,
+          extractorUsed: extraction.extractorUsed,
           disclaimer:
-            "This app is not HIPAA-certified. Use it as an educational tool and verify amounts before paying.",
+            "This app is not HIPAA-certified. Confidence reflects document clarity + evidence matches. Verify before paying.",
         },
       };
 
@@ -200,8 +236,7 @@ async function handleBillProcessing(request, env, cors) {
         {
           isPaid,
           isDeveloper,
-          devBypass: isDeveloper,
-          extractionMeta,
+          extraction,
           pages: [{ page: 1, rawText: text || "No readable text detected.", structured }],
           explanation: structured.explanation,
         },
@@ -209,58 +244,118 @@ async function handleBillProcessing(request, env, cors) {
       );
     }
 
-    // =======================
-    // 1) STATEMENT-AWARE EXTRACTION (regex + heuristics)
-    // =======================
-    const statementAmounts = extractStatementAmounts(text, sourceType);
-
-    // =======================
-    // 2) AI EXTRACTION + EXPLANATION (strict JSON, no guessing)
-    // =======================
-    const [openAIResult, geminiResult] = await Promise.all([
-      analyzeWithOpenAI(text, isPaid, env),
-      analyzeWithGemini(text, isPaid, env),
+    // =========================
+    // 1) AI-FIRST STRUCTURED EXTRACTION (WITH CITATIONS)
+    // =========================
+    const [openAI, gemini] = await Promise.all([
+      analyzeWithOpenAI_AIExtract(lines, isPaid, env),
+      analyzeWithGemini_AIExtract(lines, isPaid, env),
     ]);
 
-    // Normalize AI outputs to a consistent shape
-    const ai = mergeAI(openAIResult, geminiResult);
+    // Build a merged AI view (prefer OpenAI; fallback to Gemini)
+    const aiMerged = mergeAIResults(openAI, gemini);
 
-    // AI-assisted amounts (only if explicit)
-    const aiAmounts = normalizeAIAmounts(ai?.keyAmounts || {});
+    // =========================
+    // 2) REGEX FALLBACK (KEEP)
+    // =========================
+    const regexTotalCharges = extractMoneyField(text, {
+      label: "Total Charges",
+      sourceType: extraction.sourceType || sourceType,
+      lineKeywords: ["total", "charges", "amount billed", "total amount", "total charges"],
+      strongRegexes: [
+        /total\s*(charges?|amount\s*billed|amount)\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /amount\s*billed\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+      ],
+      fallbackPick: "max",
+    });
 
-    // =======================
-    // 3) MERGE amounts safely:
-    // - prefer statement-aware regex hits with higher confidence
-    // - allow AI to fill missing fields if explicit
-    // - add AI agreement boost when both mention same number
-    // =======================
-    const merged = mergeAmounts(statementAmounts, aiAmounts, sourceType);
+    const regexInsurancePaid = extractMoneyField(text, {
+      label: "Insurance Paid",
+      sourceType: extraction.sourceType || sourceType,
+      lineKeywords: ["insurance", "paid", "payment", "adjustment", "allowed", "plan paid"],
+      strongRegexes: [
+        /insurance\s*(paid|payment)\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /plan\s*(paid|payment)\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /allowed\s*amount\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /adjustments?\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+      ],
+      fallbackPick: "best-near-keywords",
+    });
 
-    // AI agreement confidence boost
-    applyAIConfidenceBoost(openAIResult, geminiResult, [
-      merged.totalCharges,
-      merged.insurancePaid,
-      merged.patientResponsibility,
-    ]);
+    const regexPatientDue = extractMoneyField(text, {
+      label: "Patient Responsibility",
+      sourceType: extraction.sourceType || sourceType,
+      lineKeywords: [
+        "patient responsibility",
+        "patient balance",
+        "balance due",
+        "amount due",
+        "you owe",
+        "please pay",
+        "total due",
+        "amt due",
+        "net due",
+      ],
+      strongRegexes: [
+        /(patient\s*(responsibility|balance|due|owe))\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /(balance\s*due|amount\s*due|total\s*due|net\s*due|amt\s*due)\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /(please\s*pay)\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+      ],
+      fallbackPick: "due",
+    });
+
+    // =========================
+    // 3) PICK FINAL AMOUNTS (AI-first; regex fallback)
+    // =========================
+    const totalCharges = pickFinalField(
+      "Total Charges",
+      aiMerged?.fields?.totalCharges,
+      regexTotalCharges,
+      extraction.sourceType || sourceType
+    );
+
+    const insurancePaid = pickFinalField(
+      "Insurance Paid",
+      aiMerged?.fields?.insurancePaid,
+      regexInsurancePaid,
+      extraction.sourceType || sourceType
+    );
+
+    const patientResponsibility = pickFinalField(
+      "Patient Responsibility",
+      aiMerged?.fields?.patientResponsibility,
+      regexPatientDue,
+      extraction.sourceType || sourceType
+    );
+
+    // Boost if both AIs agree on same amount (or very close)
+    applyCrossAIAmountBoost(openAI, gemini, [totalCharges, insurancePaid, patientResponsibility]);
+
+    // Boost if value appears in text (sanity)
+    applyInTextBoost(text, [totalCharges, insurancePaid, patientResponsibility]);
 
     const structured = {
-      summary: ai?.summary || "Bill analyzed.",
+      summary: aiMerged?.summary || "Bill analyzed.",
       explanation:
-        ai?.explanation ||
+        aiMerged?.explanation ||
         "Analysis complete. Verify all amounts with your provider/insurer before paying.",
-      summaryPoints: ai?.summaryPoints || [],
-      nextSteps: ai?.nextSteps || [],
+      nextSteps: Array.isArray(aiMerged?.nextSteps) ? aiMerged.nextSteps : [],
       keyAmounts: {
-        totalCharges: merged.totalCharges,
-        insurancePaid: merged.insurancePaid,
-        patientResponsibility: merged.patientResponsibility,
-        _debug: merged._debug,
+        totalCharges,
+        insurancePaid,
+        patientResponsibility,
       },
       confidenceMeta: {
-        sourceType,
-        usedOCR,
+        sourceType: extraction.sourceType || sourceType,
+        usedOCR: extraction.usedOCR,
+        extractorUsed: extraction.extractorUsed,
         disclaimer:
-          "This app is not HIPAA-certified. Confidence reflects document clarity + explicit matches. Verify amounts before payment.",
+          "This app is not HIPAA-certified. Confidence reflects evidence + OCR clarity. Always verify totals before payment.",
+      },
+      // Optional: for UI “trust” / debugging panels
+      aiMeta: {
+        openai_ok: !!openAI?.ok,
+        gemini_ok: !!gemini?.ok,
       },
     };
 
@@ -268,8 +363,7 @@ async function handleBillProcessing(request, env, cors) {
       {
         isPaid,
         isDeveloper,
-        devBypass: isDeveloper,
-        extractionMeta,
+        extraction, // tells you which OCR path was used
         pages: [{ page: 1, rawText: text, structured }],
         explanation: structured.explanation,
       },
@@ -281,208 +375,178 @@ async function handleBillProcessing(request, env, cors) {
   }
 }
 
-// ======================== STATEMENT-AWARE AMOUNT EXTRACTION ========================
-// This is the critical fix: on table-heavy bills, NEVER use "largest number found".
-// We prioritize "PAY THIS AMOUNT / AMOUNT DUE / BALANCE DUE / NET DUE" etc.
-// Insurance Paid often is NOT shown on simple statements; keep it Not detected unless explicit.
-function extractStatementAmounts(text, sourceType) {
-  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+// ======================== AI-FIRST (STRICT JSON + CITATIONS) ========================
 
-  const patientDue = findAmountNearLabels(lines, [
-    "pay this amount",
-    "amount due",
-    "balance due",
-    "net due",
-    "total due",
-    "patient due",
-    "please pay",
-    "amt due",
-  ]);
+async function analyzeWithOpenAI_AIExtract(numberedLines, isPaid, env) {
+  try {
+    if (!env.OPENAI_API_KEY) return { ok: false, provider: "openai", error: "missing_key" };
 
-  const totalCharges = findAmountNearLabels(lines, [
-    "total charges",
-    "amount billed",
-    "total amount",
-    "total billed",
-    "charges",
-    "billed",
-  ]);
+    const model = isPaid ? "gpt-4o" : "gpt-4o-mini";
 
-  const insurancePaid = findAmountNearLabels(lines, [
-    "insurance paid",
-    "plan paid",
-    "payer paid",
-    "insurance payment",
-    "adjustment",
-    "allowed amount",
-    "insurance",
-  ]);
+    const system =
+      `You are ExplainMyBill.\n` +
+      `Return ONLY valid JSON. No markdown.\n` +
+      `Do NOT guess numbers. If not explicit, use null.\n` +
+      `You MUST cite evidence lines from the provided numbered lines.\n` +
+      `Citations format: [{"line": <number>, "text": "<exact line text>"}].\n\n` +
+      `JSON schema:\n` +
+      `{\n` +
+      `  "summary": string,\n` +
+      `  "explanation": string,\n` +
+      `  "nextSteps": string[],\n` +
+      `  "fields": {\n` +
+      `    "totalCharges": {"amount": number|null, "currency": "USD"|null, "citations": [{"line": number, "text": string}]},\n` +
+      `    "insurancePaid": {"amount": number|null, "currency": "USD"|null, "citations": [{"line": number, "text": string}]},\n` +
+      `    "patientResponsibility": {"amount": number|null, "currency": "USD"|null, "citations": [{"line": number, "text": string}]}\n` +
+      `  }\n` +
+      `}\n\n` +
+      `Rules:\n` +
+      `- If you see "PAY THIS AMOUNT", "BALANCE DUE", "AMOUNT DUE", map it to patientResponsibility.\n` +
+      `- totalCharges is the total billed/charges/statement total.\n` +
+      `- insurancePaid is insurer/plan payments/adjustments ONLY if explicitly stated.\n` +
+      `- Use citations that actually contain the value or label.\n`;
 
-  // Build fields with confidence tuned for match quality
-  const fPatient = patientDue.found
-    ? buildField("Patient Responsibility", patientDue.amount, sourceType, patientDue.reason, patientDue.matchLine, patientDue.method)
-    : notDetectedField("Patient Responsibility", sourceType, "No explicit Amount Due / Balance Due / Pay This Amount found");
+    const user =
+      `Here are numbered lines from the bill OCR/text.\n` +
+      `Extract the 3 fields with citations and provide a plain-English explanation.\n\n` +
+      `${numberedLines}`;
 
-  const fTotal = totalCharges.found
-    ? buildField("Total Charges", totalCharges.amount, sourceType, totalCharges.reason, totalCharges.matchLine, totalCharges.method)
-    : notDetectedField("Total Charges", sourceType, "No explicit Total Charges / Amount Billed found");
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user },
+        ],
+        temperature: 0,
+      }),
+    });
 
-  // Insurance Paid: if only table numbers exist, do NOT guess.
-  const fIns = insurancePaid.found
-    ? buildField("Insurance Paid", insurancePaid.amount, sourceType, insurancePaid.reason, insurancePaid.matchLine, insurancePaid.method)
-    : notDetectedField("Insurance Paid", sourceType, "Not explicitly stated (common on statements)");
+    const status = res.status;
+    if (!res.ok) return { ok: false, provider: "openai", status };
 
-  // Debug: show top candidates found around these labels
-  const dbg = {
-    label: "_debug",
-    value: "—",
-    confidence: 0,
-    reason: "debug meta",
-    source: sourceType,
-    meta: {
-      patientDueCandidate: patientDue,
-      totalChargesCandidate: totalCharges,
-      insurancePaidCandidate: insurancePaid,
-    },
+    const json = await res.json();
+    const content = json.choices?.[0]?.message?.content || "";
+    const parsed = safeParseJsonFromText(content);
+
+    return { ok: !!parsed, provider: "openai", status, ...parsed };
+  } catch (e) {
+    return { ok: false, provider: "openai", error: e?.message || "error" };
+  }
+}
+
+async function analyzeWithGemini_AIExtract(numberedLines, isPaid, env) {
+  try {
+    if (!env.GEMINI_API_KEY) return { ok: false, provider: "gemini", error: "missing_key" };
+
+    const model = isPaid ? "gemini-1.5-pro" : "gemini-1.5-flash";
+
+    const prompt =
+      `Return ONLY valid JSON (no markdown). Do NOT guess numbers.\n` +
+      `You MUST cite evidence lines from the provided numbered lines.\n` +
+      `Schema:\n` +
+      `{\n` +
+      ` "summary": string,\n` +
+      ` "explanation": string,\n` +
+      ` "nextSteps": string[],\n` +
+      ` "fields": {\n` +
+      `  "totalCharges": {"amount": number|null, "currency": "USD"|null, "citations":[{"line":number,"text":string}]},\n` +
+      `  "insurancePaid": {"amount": number|null, "currency": "USD"|null, "citations":[{"line":number,"text":string}]},\n` +
+      `  "patientResponsibility": {"amount": number|null, "currency": "USD"|null, "citations":[{"line":number,"text":string}]}\n` +
+      ` }\n` +
+      `}\n\n` +
+      `Rules:\n` +
+      `- "PAY THIS AMOUNT"/"BALANCE DUE"/"AMOUNT DUE" => patientResponsibility.\n` +
+      `- Use citations that actually show the value/label.\n\n` +
+      `NUMBERED LINES:\n${numberedLines}`;
+
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+      }
+    );
+
+    const status = res.status;
+    if (!res.ok) return { ok: false, provider: "gemini", status };
+
+    const json = await res.json();
+    const out = json.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    const parsed = safeParseJsonFromText(out);
+
+    return { ok: !!parsed, provider: "gemini", status, ...parsed };
+  } catch (e) {
+    return { ok: false, provider: "gemini", error: e?.message || "error" };
+  }
+}
+
+function mergeAIResults(openAI, gemini) {
+  // Prefer OpenAI when ok, else Gemini
+  const a = openAI && openAI.ok ? openAI : null;
+  const g = gemini && gemini.ok ? gemini : null;
+
+  const pick = a || g;
+  if (!pick) return null;
+
+  // If both exist, keep OpenAI’s narrative but fill missing from Gemini
+  const fields = {
+    totalCharges: pick?.fields?.totalCharges || null,
+    insurancePaid: pick?.fields?.insurancePaid || null,
+    patientResponsibility: pick?.fields?.patientResponsibility || null,
   };
+
+  if (a && g) {
+    fields.totalCharges = a.fields?.totalCharges || g.fields?.totalCharges || null;
+    fields.insurancePaid = a.fields?.insurancePaid || g.fields?.insurancePaid || null;
+    fields.patientResponsibility =
+      a.fields?.patientResponsibility || g.fields?.patientResponsibility || null;
+  }
 
   return {
-    totalCharges: fTotal,
-    insurancePaid: fIns,
-    patientResponsibility: fPatient,
-    _debug: dbg,
+    summary: pick.summary || "",
+    explanation: pick.explanation || "",
+    nextSteps: Array.isArray(pick.nextSteps) ? pick.nextSteps : [],
+    fields,
   };
 }
 
-// Finds an amount on the same line as label OR within next 2 lines.
-// Also avoids grabbing random table columns by preferring:
-// - lines that contain a label
-// - amounts that appear right after the label
-function findAmountNearLabels(lines, labels) {
-  const kws = labels.map((x) => x.toLowerCase());
+// ======================== FINAL FIELD PICKER ========================
 
-  // Pass A: same-line label + amount
-  for (const line of lines) {
-    const ll = line.toLowerCase();
-    if (!kws.some((k) => ll.includes(k))) continue;
-
-    const amt = findMoneyClosestToLabel(line, kws);
-    if (amt) {
-      return {
-        found: true,
-        amount: amt,
-        reason: "Found amount on labeled line",
-        matchLine: line,
-        method: "label_same_line",
-      };
-    }
+function pickFinalField(label, aiField, regexField, sourceType) {
+  // If AI gave a real number AND has citations, trust it first
+  if (aiField && isFiniteNumber(aiField.amount) && Array.isArray(aiField.citations) && aiField.citations.length) {
+    const amt = Number(aiField.amount);
+    return buildFieldWithCitations(label, amt, sourceType, {
+      reasonBase: "AI extracted with citations",
+      citations: sanitizeCitations(aiField.citations),
+      from: "ai",
+    });
   }
 
-  // Pass B: label line then amount in next 1–2 lines (common on statements)
-  for (let i = 0; i < lines.length; i++) {
-    const ll = lines[i].toLowerCase();
-    if (!kws.some((k) => ll.includes(k))) continue;
-
-    const window = [lines[i], lines[i + 1] || "", lines[i + 2] || ""].join(" ");
-    const amt = findMoneyClosestToLabel(window, kws);
-    if (amt) {
-      return {
-        found: true,
-        amount: amt,
-        reason: "Found amount near label (within 2 lines)",
-        matchLine: window.slice(0, 240),
-        method: "label_nearby",
-      };
-    }
-  }
-
-  return { found: false };
-}
-
-// Prefer amounts that appear AFTER label position in a line/window.
-// If none after, fallback to first plausible amount.
-function findMoneyClosestToLabel(str, kws) {
-  const s = String(str);
-  const lower = s.toLowerCase();
-
-  // Find the earliest label index
-  let bestIdx = Infinity;
-  for (const k of kws) {
-    const idx = lower.indexOf(k);
-    if (idx !== -1 && idx < bestIdx) bestIdx = idx;
-  }
-
-  const moneyMatches = [...s.matchAll(/\$?\s*([\d]{1,3}(?:,[\d]{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)/g)];
-  if (!moneyMatches.length) return null;
-
-  // Prefer the first money match that occurs AFTER the label
-  if (bestIdx !== Infinity) {
-    for (const m of moneyMatches) {
-      if (typeof m.index === "number" && m.index > bestIdx) {
-        const amt = normalizeAmount(m[1]);
-        const val = Number(amt);
-        if (isFinite(val) && val > 0 && !looksLikeYear(val)) return amt;
-      }
-    }
-  }
-
-  // Otherwise: first plausible money
-  for (const m of moneyMatches) {
-    const amt = normalizeAmount(m[1]);
-    const val = Number(amt);
-    if (isFinite(val) && val > 0 && !looksLikeYear(val)) return amt;
-  }
-
-  return null;
-}
-
-function looksLikeYear(v) {
-  return v >= 1900 && v <= 2099;
-}
-
-// ======================== MERGE AMOUNTS (regex + AI) ========================
-function mergeAmounts(statementAmounts, aiAmounts, sourceType) {
-  const out = {
-    totalCharges: statementAmounts.totalCharges,
-    insurancePaid: statementAmounts.insurancePaid,
-    patientResponsibility: statementAmounts.patientResponsibility,
-    _debug: statementAmounts._debug,
-  };
-
-  // If statement returned Not detected but AI explicitly provided a value, use AI (lower confidence).
-  out.totalCharges = mergeOne(out.totalCharges, aiAmounts.totalCharges, sourceType, "ai_fill");
-  out.insurancePaid = mergeOne(out.insurancePaid, aiAmounts.insurancePaid, sourceType, "ai_fill");
-  out.patientResponsibility = mergeOne(out.patientResponsibility, aiAmounts.patientResponsibility, sourceType, "ai_fill");
-
-  return out;
-}
-
-function mergeOne(primary, aiField, sourceType, mode) {
-  const primaryHas = primary && primary.value && primary.value !== "Not detected";
-  const aiHas = aiField && aiField.value && aiField.value !== "Not detected";
-
-  if (primaryHas) return primary;
-
-  if (aiHas) {
-    // AI fill should be cautious unless it cites an explicit label
-    const c = clamp((aiField.confidence || 0.55) - (sourceType.includes("ocr") ? 0.1 : 0), 0.25, 0.85);
+  // Otherwise fallback to regex result (already formatted)
+  if (regexField && regexField.value !== "Not detected") {
+    // Add a placeholder citation if we can’t guarantee exact line
+    // (Regex is still useful, but citations are AI-first feature.)
     return {
-      ...aiField,
-      confidence: Number(c.toFixed(2)),
-      reason: (aiField.reason || "Provided by AI from explicit text") + " (AI-extracted)",
-      source: (aiField.source || sourceType) + "+ai",
-      matchMethod: aiField.matchMethod || mode,
+      ...regexField,
+      reason: (regexField.reason || "Regex extraction") + " (AI missing/uncertain)",
+      from: "regex",
+      citations: [],
     };
   }
 
-  return primary;
+  return notDetectedField(label, sourceType, "AI + regex could not confidently locate this field");
 }
 
-// ======================== FIELD BUILDING ========================
-function buildField(label, amountStr, sourceType, reasonBase, matchLine, matchMethod) {
-  const cleaned = normalizeAmount(amountStr);
-
-  let confidence = 0.78; // higher base because we now require label proximity
+function buildFieldWithCitations(label, amountNumber, sourceType, { reasonBase, citations, from }) {
+  let confidence = 0.80; // AI with citations starts higher than raw regex
   let reason = reasonBase;
 
   if (sourceType.includes("pdf")) confidence += 0.08;
@@ -492,113 +556,85 @@ function buildField(label, amountStr, sourceType, reasonBase, matchLine, matchMe
     reason += " (OCR text can be noisy)";
   }
 
-  confidence = clamp(confidence, 0.2, 0.95);
+  confidence = clamp(confidence, 0.20, 0.97);
 
+  const raw = String(amountNumber.toFixed(2));
   return {
     label,
-    value: formatUSD(cleaned),
+    value: formatUSD(raw),
+    raw,
     confidence: Number(confidence.toFixed(2)),
     reason,
     source: sourceType,
-    raw: cleaned,
-    matchLine: matchLine ? String(matchLine).slice(0, 260) : null,
-    matchMethod: matchMethod || "unknown",
+    from, // "ai" or "regex"
+    citations: citations || [],
   };
 }
 
-function notDetectedField(label, sourceType, why = "No clear matching line found") {
-  return {
-    label,
-    value: "Not detected",
-    confidence: 0,
-    reason: why,
-    source: sourceType || "none",
-    raw: null,
-    matchLine: null,
-    matchMethod: "none",
-  };
+function sanitizeCitations(citations) {
+  // ensure we never return huge text
+  return (citations || [])
+    .filter((c) => c && Number.isInteger(c.line) && typeof c.text === "string")
+    .slice(0, 6)
+    .map((c) => ({
+      line: c.line,
+      text: c.text.slice(0, 180),
+    }));
 }
 
-// ======================== AI MERGE + AI AMOUNTS NORMALIZE ========================
-function mergeAI(openAI, gemini) {
-  // prefer OpenAI if present; otherwise Gemini
-  const base = openAI || gemini || null;
-  if (!base) return null;
+// ======================== CONFIDENCE BOOSTS ========================
 
-  // If one has fields missing, fill from the other
-  const other = base === openAI ? gemini : openAI;
+function applyCrossAIAmountBoost(openAI, gemini, fields) {
+  const o = openAI?.fields || {};
+  const g = gemini?.fields || {};
 
-  return {
-    summary: base.summary || other?.summary || "",
-    explanation: base.explanation || other?.explanation || "",
-    summaryPoints: base.summaryPoints || other?.summaryPoints || [],
-    nextSteps: base.nextSteps || other?.nextSteps || [],
-    keyAmounts: base.keyAmounts || other?.keyAmounts || {},
-  };
-}
+  const pairs = [
+    ["totalCharges", o.totalCharges, g.totalCharges],
+    ["insurancePaid", o.insurancePaid, g.insurancePaid],
+    ["patientResponsibility", o.patientResponsibility, g.patientResponsibility],
+  ];
 
-function normalizeAIAmounts(keyAmounts) {
-  // Expected AI schema:
-  // {
-  //   totalCharges: { value: "111.41" or "$111.41" or null, reason: "...", confidence: 0.6 },
-  //   insurancePaid: ...,
-  //   patientResponsibility: ...
-  // }
-  const norm = {};
-  for (const k of ["totalCharges", "insurancePaid", "patientResponsibility"]) {
-    const v = keyAmounts?.[k];
-    if (!v || v.value == null) {
-      norm[k] = { value: "Not detected", confidence: 0, reason: "AI did not find explicit value", source: "ai" };
-      continue;
+  for (const [key, a, b] of pairs) {
+    if (!a || !b) continue;
+    if (!isFiniteNumber(a.amount) || !isFiniteNumber(b.amount)) continue;
+
+    const diff = Math.abs(Number(a.amount) - Number(b.amount));
+    const base = Math.max(Number(a.amount), Number(b.amount), 1);
+
+    // If within 1% or within $2, boost
+    if (diff <= 2 || diff / base <= 0.01) {
+      const f = fields.find((x) => (x.label || "").toLowerCase().includes(key.replace(/([A-Z])/g, " $1").toLowerCase().split(" ")[0]));
+      // safer: match by label exact
+      const target = fields.find((x) => x.label === labelFromKey(key));
+      if (target && target.value !== "Not detected") {
+        target.confidence = Math.min(1, Number((target.confidence + 0.06).toFixed(2)));
+        target.reason += " + OpenAI & Gemini agree";
+        target.source += "+ai2";
+      }
     }
-    const cleaned = normalizeAmount(String(v.value));
-    if (!cleaned) {
-      norm[k] = { value: "Not detected", confidence: 0, reason: "AI value not parseable", source: "ai" };
-      continue;
-    }
-    norm[k] = {
-      label: k,
-      value: formatUSD(cleaned),
-      raw: cleaned,
-      confidence: clamp(Number(v.confidence ?? 0.6), 0.25, 0.85),
-      reason: v.reason || "AI found an explicit labeled value",
-      source: "ai",
-      matchLine: v.matchLine ? String(v.matchLine).slice(0, 260) : null,
-      matchMethod: "ai",
-    };
   }
-  return norm;
 }
 
-// ======================== CONFIDENCE BOOST VIA AI AGREEMENT ========================
-function applyAIConfidenceBoost(openAI, gemini, fields) {
-  const aiText = (safeStringify(openAI) + " " + safeStringify(gemini)).toLowerCase();
-
+function applyInTextBoost(text, fields) {
+  const t = String(text || "").replace(/,/g, "");
   for (const f of fields) {
     if (!f || !f.raw || f.value === "Not detected") continue;
-
     const raw = String(f.raw).replace(/,/g, "");
-    const raw2 = raw.replace(/\.00$/, "");
-    const asDollars = String(f.value).replace(/\$/g, "").replace(/,/g, "");
-
-    if (aiText.includes(raw) || aiText.includes(raw2) || aiText.includes(asDollars)) {
-      f.confidence = Math.min(1, Number((f.confidence + 0.08).toFixed(2)));
-      f.reason += " + mentioned by AI analysis";
-      f.source += "+ai";
+    if (raw && t.includes(raw)) {
+      f.confidence = Math.min(1, Number((f.confidence + 0.04).toFixed(2)));
+      f.reason += " + amount appears in extracted text";
     }
   }
+}
+
+function labelFromKey(key) {
+  if (key === "totalCharges") return "Total Charges";
+  if (key === "insurancePaid") return "Insurance Paid";
+  if (key === "patientResponsibility") return "Patient Responsibility";
+  return key;
 }
 
 // ======================== PDF TEXT EXTRACTION ========================
-async function safeExtractPdfText(uint8) {
-  try {
-    const text = await extractTextFromPDF(uint8);
-    return { ok: true, provider: "pdf_text", status: 200, textLen: (text || "").length, text };
-  } catch (e) {
-    return { ok: false, provider: "pdf_text", status: 500, textLen: 0, text: "" };
-  }
-}
-
 async function extractTextFromPDF(uint8) {
   try {
     const pdfjs = await import("https://cdn.jsdelivr.net/npm/pdfjs-dist@4.5.136/+esm");
@@ -609,7 +645,8 @@ async function extractTextFromPDF(uint8) {
     for (let i = 1; i <= pdf.numPages; i++) {
       const page = await pdf.getPage(i);
       const content = await page.getTextContent();
-      text += content.items.map((it) => (it?.str ? it.str : "")).join(" ") + "\n";
+      const pageText = content.items.map((it) => (it?.str ? it.str : "")).join(" ");
+      text += pageText + "\n";
     }
     return text.trim();
   } catch {
@@ -617,25 +654,10 @@ async function extractTextFromPDF(uint8) {
   }
 }
 
-// ======================== OCR / EXCEL / HELPERS ========================
-async function safeExtractGoogleVision(uint8, mimeType, env) {
+// ======================== OCR / EXCEL ========================
+async function extractWithGoogleVision(uint8, mimeType, env, extraction) {
   try {
-    const text = await extractWithGoogleVision(uint8, mimeType, env);
-    return {
-      ok: true,
-      provider: "google_vision",
-      status: 200,
-      textLen: (text || "").length,
-      text,
-    };
-  } catch {
-    return { ok: false, provider: "google_vision", status: 500, textLen: 0, text: "" };
-  }
-}
-
-async function extractWithGoogleVision(uint8, mimeType, env) {
-  try {
-    if (!env.GOOGLE_VISION_API_KEY) return "";
+    if (!env.GOOGLE_VISION_API_KEY) return { text: "", status: 0 };
 
     const base64 = uint8ArrayToBase64(uint8);
     const res = await fetch(
@@ -654,26 +676,20 @@ async function extractWithGoogleVision(uint8, mimeType, env) {
       }
     );
 
-    if (!res.ok) return "";
-    const json = await res.json();
-    return json.responses?.[0]?.fullTextAnnotation?.text || "";
-  } catch {
-    return "";
-  }
-}
+    const status = res.status;
+    if (!res.ok) return { text: "", status };
 
-async function safeExtractOcrSpace(uint8, mimeType, env) {
-  try {
-    const text = await extractWithOcrSpace(uint8, mimeType, env);
-    return { ok: true, provider: "ocr_space", status: 200, textLen: (text || "").length, text };
+    const json = await res.json();
+    const text = json.responses?.[0]?.fullTextAnnotation?.text || "";
+    return { text, status };
   } catch {
-    return { ok: false, provider: "ocr_space", status: 500, textLen: 0, text: "" };
+    return { text: "", status: 0 };
   }
 }
 
 async function extractWithOcrSpace(uint8, mimeType, env) {
   try {
-    if (!env.OCR_SPACE_API_KEY) return "";
+    if (!env.OCR_SPACE_API_KEY) return { text: "", status: 0 };
 
     const base64 = uint8ArrayToBase64(uint8);
     const res = await fetch("https://api.ocr.space/parse/image", {
@@ -691,11 +707,14 @@ async function extractWithOcrSpace(uint8, mimeType, env) {
       }),
     });
 
-    if (!res.ok) return "";
+    const status = res.status;
+    if (!res.ok) return { text: "", status };
+
     const json = await res.json();
-    return json.ParsedResults?.[0]?.ParsedText || "";
+    const text = json.ParsedResults?.[0]?.ParsedText || "";
+    return { text, status };
   } catch {
-    return "";
+    return { text: "", status: 0 };
   }
 }
 
@@ -708,105 +727,128 @@ async function processExcel(buffer) {
   }));
 }
 
-// ======================== AI (STRICT JSON + AMOUNTS) ========================
-async function analyzeWithOpenAI(text, isPaid, env) {
-  try {
-    if (!env.OPENAI_API_KEY) return null;
+// ======================== REGEX FALLBACK (PRESERVED) ========================
+function extractMoneyField(text, cfg) {
+  const { label, sourceType, strongRegexes = [], lineKeywords = [], fallbackPick } = cfg;
 
-    const model = isPaid ? "gpt-4o" : "gpt-4o-mini";
-
-    const system =
-      `You are ExplainMyBill.\n` +
-      `Return ONLY valid JSON (no markdown, no extra text).\n` +
-      `Do NOT guess amounts. Only extract amounts if explicitly present in the text.\n` +
-      `If a value is not clearly labeled, use null.\n\n` +
-      `Schema:\n` +
-      `{\n` +
-      `  "summary": string,\n` +
-      `  "summaryPoints": string[],\n` +
-      `  "explanation": string,\n` +
-      `  "nextSteps": string[],\n` +
-      `  "keyAmounts": {\n` +
-      `     "totalCharges": { "value": string|null, "reason": string, "confidence": number, "matchLine": string|null },\n` +
-      `     "insurancePaid": { "value": string|null, "reason": string, "confidence": number, "matchLine": string|null },\n` +
-      `     "patientResponsibility": { "value": string|null, "reason": string, "confidence": number, "matchLine": string|null }\n` +
-      `  }\n` +
-      `}`;
-
-    const user =
-      `Simplify this medical bill for a normal person.\n` +
-      `1) Explain what this statement is\n` +
-      `2) Explain what "pay this amount / amount due" means\n` +
-      `3) Provide practical next steps (itemized bill, payment plan, insurance EOB, dispute)\n` +
-      `4) Extract labeled amounts ONLY if explicit.\n\n` +
-      `BILL TEXT:\n${text}`;
-
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: user },
-        ],
-        temperature: 0,
-      }),
-    });
-
-    if (!res.ok) return null;
-    const json = await res.json();
-    const content = json.choices?.[0]?.message?.content || "";
-    return safeParseJsonFromText(content);
-  } catch {
-    return null;
+  for (const rx of strongRegexes) {
+    const m = text.match(rx);
+    if (m) {
+      const amt = pickAmountGroup(m);
+      if (amt) return buildField(label, amt, sourceType, "Matched strong labeled pattern");
+    }
   }
+
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  const kw = lineKeywords.map((k) => k.toLowerCase());
+
+  const candidateLines = lines.filter((l) => {
+    const ll = l.toLowerCase();
+    return kw.some((k) => ll.includes(k));
+  });
+
+  for (const line of candidateLines) {
+    const amt = findFirstMoney(line);
+    if (amt) return buildField(label, amt, sourceType, "Found amount on a labeled line");
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const ll = lines[i].toLowerCase();
+    if (!kw.some((k) => ll.includes(k))) continue;
+
+    const window = [lines[i], lines[i + 1] || "", lines[i + 2] || ""].join(" ");
+    const amt = findFirstMoney(window);
+    if (amt) return buildField(label, amt, sourceType, "Found amount near labeled text");
+  }
+
+  const allMoney = extractAllMoney(text);
+  if (!allMoney.length) return notDetectedField(label, sourceType, "No currency values detected anywhere");
+
+  if (fallbackPick === "due") {
+    const dueCandidates = candidateMoneyByLine(lines, [
+      "amount due",
+      "balance due",
+      "total due",
+      "please pay",
+      "you owe",
+      "net due",
+      "amt due",
+      "pay this amount",
+    ]);
+    if (dueCandidates.length) {
+      return buildField(label, dueCandidates[0].amount, sourceType, "Fallback: selected amount from a due/balance line");
+    }
+    const sorted = [...allMoney].sort((a, b) => a.value - b.value);
+    const pick = sorted[sorted.length - 1];
+    return buildField(label, pick.amount, sourceType, "Fallback: picked likely amount (heuristic)");
+  }
+
+  if (fallbackPick === "max") {
+    const max = allMoney.reduce((a, b) => (b.value > a.value ? b : a));
+    return buildField(label, max.amount, sourceType, "Fallback: selected largest amount found");
+  }
+
+  if (fallbackPick === "best-near-keywords") {
+    const near = candidateMoneyByLine(lines, ["insurance", "plan", "paid", "adjustment", "allowed"]);
+    if (near.length) {
+      return buildField(label, near[0].amount, sourceType, "Fallback: selected amount near insurance keywords");
+    }
+  }
+
+  return buildField(label, allMoney[0].amount, sourceType, "Fallback: selected first detected amount");
 }
 
-async function analyzeWithGemini(text, isPaid, env) {
-  try {
-    if (!env.GEMINI_API_KEY) return null;
+function candidateMoneyByLine(lines, keywords) {
+  const out = [];
+  const kw = keywords.map((k) => k.toLowerCase());
 
-    const model = isPaid ? "gemini-1.5-pro" : "gemini-1.5-flash";
-
-    const prompt =
-      `Return ONLY valid JSON (no markdown, no extra text).\n` +
-      `Do NOT guess amounts. Only extract if explicitly labeled.\n` +
-      `Schema:\n` +
-      `{\n` +
-      `  "summary": string,\n` +
-      `  "summaryPoints": string[],\n` +
-      `  "explanation": string,\n` +
-      `  "nextSteps": string[],\n` +
-      `  "keyAmounts": {\n` +
-      `     "totalCharges": { "value": string|null, "reason": string, "confidence": number, "matchLine": string|null },\n` +
-      `     "insurancePaid": { "value": string|null, "reason": string, "confidence": number, "matchLine": string|null },\n` +
-      `     "patientResponsibility": { "value": string|null, "reason": string, "confidence": number, "matchLine": string|null }\n` +
-      `  }\n` +
-      `}\n\n` +
-      `BILL TEXT:\n${text}`;
-
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-        }),
-      }
-    );
-
-    if (!res.ok) return null;
-    const json = await res.json();
-    const out = json.candidates?.[0]?.content?.parts?.[0]?.text || "";
-    return safeParseJsonFromText(out);
-  } catch {
-    return null;
+  for (const line of lines) {
+    const ll = line.toLowerCase();
+    if (!kw.some((k) => ll.includes(k))) continue;
+    const money = extractAllMoney(line);
+    for (const m of money) out.push(m);
   }
+
+  out.sort((a, b) => b.value - a.value);
+  return out;
+}
+
+function buildField(label, amountStr, sourceType, reasonBase) {
+  const cleaned = normalizeAmount(amountStr);
+  let confidence = 0.70;
+  let reason = reasonBase;
+
+  if (sourceType.includes("pdf")) confidence += 0.10;
+  if (sourceType.includes("excel")) confidence += 0.05;
+  if (sourceType.includes("ocr")) {
+    confidence -= 0.18;
+    reason += " (OCR text can be noisy)";
+  }
+
+  confidence = clamp(confidence, 0.15, 0.95);
+
+  return {
+    label,
+    value: formatUSD(cleaned),
+    confidence: Number(confidence.toFixed(2)),
+    reason,
+    source: sourceType,
+    raw: cleaned,
+    from: "regex",
+    citations: [],
+  };
+}
+
+function notDetectedField(label, sourceType, why = "No clear matching line found") {
+  return {
+    label,
+    value: "Not detected",
+    confidence: 0,
+    reason: why,
+    source: sourceType || "none",
+    from: "none",
+    citations: [],
+  };
 }
 
 // ======================== TEXT HELPERS ========================
@@ -820,6 +862,44 @@ function normalizeBillText(s) {
     .trim();
 }
 
+function toNumberedLines(text) {
+  const lines = String(text || "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  // Keep it bounded (cost + prompt size)
+  const capped = lines.slice(0, 300);
+
+  return capped.map((l, i) => `${i + 1}. ${l}`).join("\n");
+}
+
+function findFirstMoney(s) {
+  const m = String(s).match(/\$?\s*([\d]{1,3}(?:,[\d]{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)/);
+  if (!m) return null;
+
+  const amt = normalizeAmount(m[1]);
+  const val = Number(amt);
+  if (!isFinite(val) || val <= 0) return null;
+  return amt;
+}
+
+function extractAllMoney(s) {
+  const out = [];
+  const rx = /\$?\s*([\d]{1,3}(?:,[\d]{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)/g;
+  const str = String(s);
+  let m;
+  while ((m = rx.exec(str))) {
+    const amt = normalizeAmount(m[1]);
+    const val = Number(amt);
+    if (!isFinite(val) || val <= 0) continue;
+    if (val >= 1900 && val <= 2099) continue; // ignore years
+    out.push({ amount: amt, value: val });
+    if (out.length > 250) break;
+  }
+  return out;
+}
+
 function normalizeAmount(a) {
   return String(a || "").replace(/,/g, "").replace(/[^\d.]/g, "").trim();
 }
@@ -828,6 +908,20 @@ function formatUSD(numericString) {
   const n = Number(numericString);
   if (!isFinite(n)) return "Not detected";
   return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function pickAmountGroup(matchArray) {
+  for (let i = matchArray.length - 1; i >= 1; i--) {
+    const candidate = normalizeAmount(matchArray[i]);
+    if (candidate && /^\d+(\.\d{2})?$/.test(candidate)) return candidate;
+    if (candidate && /^\d+(\.\d+)?$/.test(candidate)) return candidate;
+  }
+  return null;
+}
+
+function isFiniteNumber(x) {
+  const n = Number(x);
+  return Number.isFinite(n);
 }
 
 // ======================== BASE64 (SAFE) ========================
@@ -856,14 +950,6 @@ function safeParseJsonFromText(text) {
       }
     }
     return null;
-  }
-}
-
-function safeStringify(x) {
-  try {
-    return JSON.stringify(x || "");
-  } catch {
-    return "";
   }
 }
 

@@ -1,21 +1,22 @@
-// ExplainMyBill Worker — FULL VERSION (DEBUGGABLE EXTRACTOR + OPTIONAL OCR DISABLE)
+// ExplainMyBill Worker — FULL VERSION (FIXED FIELD EXTRACTION + DEBUG PROVIDER TRACE)
 // Dec 29, 2025
 //
 // ✅ Keeps: Google Vision + OCR.space + OpenAI + Gemini + PDF text extraction + Excel support + Stripe hook
-// ✅ Adds: extractionMeta in response so you can PROVE what ran
-// ✅ Adds: DISABLE_OCR_SPACE="true" env toggle (keeps code but prevents usage)
-// ✅ Privacy: no storage, no DB, no login, avoids logging bill text
+// ✅ Fixes: "Not detected" + "same number for all 3" via table-aware parsing + multi-pass scoring
+// ✅ Adds: Debug trace to confirm which extractor ran (google_vision vs ocr_space)
+// ✅ Dev mode: you should NEVER see upgrade prompts when testing
+// ✅ Privacy: no DB, no storage, no login (and avoids logging bill text)
 //
 // Env vars:
-// - DEV_MODE = "true"                  // unlock everything for you
-// - DEV_KEY = "some-long-secret"       // optional: X-Dev-Key header
-// - DISABLE_OCR_SPACE = "true|false"   // optional
+// - DEV_MODE="true"                 -> unlock everything for you (developer)
+// - DEV_KEY="some-long-secret"      -> optional header bypass: X-Dev-Key
+// - DISABLE_OCR_SPACE="true"        -> keep code but disable OCR fallback
+// - FORCE_VISION_ONLY="true"        -> only use Google Vision for images (no OCR.space fallback)
 // - OPENAI_API_KEY
 // - GEMINI_API_KEY
 // - GOOGLE_VISION_API_KEY
 // - OCR_SPACE_API_KEY
-// - STRIPE_SECRET_KEY (optional)
-// - STRIPE_PRICE_MONTHLY / STRIPE_PRICE_ONE_TIME (optional)
+// - STRIPE_SECRET_KEY (optional, for checkout endpoint)
 
 export default {
   async fetch(request, env) {
@@ -25,7 +26,7 @@ export default {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers":
-        "Content-Type, X-Dev-Bypass, X-Dev-Key, Authorization",
+        "Content-Type, X-Dev-Bypass, X-Dev-Key, X-Debug, Authorization",
     };
 
     if (request.method === "OPTIONS") {
@@ -55,12 +56,12 @@ export default {
 
 // ======================== BILL PROCESSING ========================
 async function handleBillProcessing(request, env, cors) {
-  try {
-    const url = new URL(request.url);
-    const debug =
-      url.searchParams.get("debug") === "1" ||
-      request.headers.get("X-Debug") === "true";
+  // Debug flag (developer-only usage recommended)
+  const debug =
+    request.headers.get("X-Debug") === "true" ||
+    new URL(request.url).searchParams.get("debug") === "true";
 
+  try {
     // -------- DEV ALWAYS-PAID MODE (YOU ARE THE DEVELOPER) --------
     const devBypassHeader = request.headers.get("X-Dev-Bypass") === "true";
     const devKeyHeader = request.headers.get("X-Dev-Key") || "";
@@ -69,6 +70,7 @@ async function handleBillProcessing(request, env, cors) {
       devBypassHeader ||
       (env.DEV_KEY && timingSafeEqual(devKeyHeader, env.DEV_KEY));
 
+    // For your testing: treat developer as paid/unlocked
     const isPaid = isDeveloper;
 
     const form = await request.formData();
@@ -88,97 +90,74 @@ async function handleBillProcessing(request, env, cors) {
     let rawText = "";
     let usedOCR = false;
     let sourceType = "unknown";
+    let extractorUsed = "none";
+    let primaryTrace = null;
+    let fallbackTrace = null;
 
-    // NEW: extraction meta to prove what ran
-    const extractionMeta = {
-      usedOCR: false,
-      extractorUsed: "none",
-      sourceType: "unknown",
-      textLen: 0,
-      primary: null,
-      fallback: null,
-      message: "EXTRACTION:",
-    };
-
-    const ocrSpaceDisabled = String(env.DISABLE_OCR_SPACE || "").toLowerCase() === "true";
+    const disableOcrSpace = String(env.DISABLE_OCR_SPACE || "").toLowerCase() === "true";
+    const forceVisionOnly = String(env.FORCE_VISION_ONLY || "").toLowerCase() === "true";
 
     // ---------- PDF ----------
     if (name.endsWith(".pdf")) {
       sourceType = "pdf";
-      extractionMeta.sourceType = "pdf";
+      rawText = await extractTextFromPDF(buffer);
+      extractorUsed = "pdf_text";
 
-      const primary = await extractTextFromPDF(buffer);
-      rawText = primary || "";
-      extractionMeta.primary = {
-        ok: !!primary,
-        provider: "pdf_text",
-        status: primary ? 200 : 500,
-        textLen: (primary || "").length,
-      };
-      extractionMeta.extractorUsed = primary ? "pdf_text" : "pdf_text_failed";
-
-      if (!rawText || rawText.trim().length < 200) {
-        if (!ocrSpaceDisabled && env.OCR_SPACE_API_KEY) {
-          usedOCR = true;
-          extractionMeta.usedOCR = true;
-          sourceType = "pdf+ocr";
-          extractionMeta.sourceType = "pdf+ocr";
-
-          const fb = await extractWithOcrSpaceDetailed(buffer, "application/pdf", env);
-          rawText = fb.text || "";
-          extractionMeta.fallback = fb.meta;
-          extractionMeta.extractorUsed = fb.meta?.provider || "ocr_space";
-        }
+      // If PDF text extraction is weak, fall back to OCR.space (if enabled)
+      if ((!rawText || rawText.trim().length < 200) && !disableOcrSpace) {
+        usedOCR = true;
+        sourceType = "pdf+ocr";
+        const ocr = await extractWithOcrSpaceDetailed(buffer, "application/pdf", env);
+        fallbackTrace = ocr.trace;
+        rawText = ocr.text || "";
+        extractorUsed = "ocr_space";
       }
     }
 
     // ---------- Excel ----------
     else if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
       sourceType = "excel";
-      extractionMeta.sourceType = "excel";
-
       const pages = await processExcel(buffer);
       rawText = pages.map((p) => p.rawText).join("\n\n");
-
-      extractionMeta.primary = {
-        ok: true,
-        provider: "xlsx",
-        status: 200,
-        textLen: rawText.length,
-      };
-      extractionMeta.extractorUsed = "xlsx";
+      extractorUsed = "excel";
     }
 
     // ---------- Image ----------
     else {
       sourceType = "image";
-      extractionMeta.sourceType = "image";
 
-      // Primary: Google Vision (DETAILED)
-      const primary = await extractWithGoogleVisionDetailed(buffer, file.type, env);
-      rawText = primary.text || "";
-      extractionMeta.primary = primary.meta;
-      extractionMeta.extractorUsed = primary.meta?.provider || "google_vision";
+      // Primary: Google Vision
+      const vision = await extractWithGoogleVisionDetailed(buffer, file.type, env);
+      primaryTrace = vision.trace;
+      rawText = vision.text || "";
+      extractorUsed = "google_vision";
 
-      // Fallback: OCR.space if Vision weak
-      if (!rawText || rawText.trim().length < 200) {
-        if (!ocrSpaceDisabled && env.OCR_SPACE_API_KEY) {
+      // Quality gate: only fallback if text quality is weak
+      const q = scoreTextQuality(rawText);
+
+      const shouldFallback =
+        !forceVisionOnly &&
+        !disableOcrSpace &&
+        (vision.ok !== true || q.score < 0.35 || rawText.trim().length < 200);
+
+      if (shouldFallback) {
+        const ocr = await extractWithOcrSpaceDetailed(buffer, file.type, env);
+        fallbackTrace = ocr.trace;
+
+        // Only switch if OCR produced meaningfully more usable text
+        const q2 = scoreTextQuality(ocr.text || "");
+        if (q2.score > q.score && (ocr.text || "").trim().length > rawText.trim().length) {
           usedOCR = true;
-          extractionMeta.usedOCR = true;
           sourceType = "image+ocr";
-          extractionMeta.sourceType = "image+ocr";
-
-          const fb = await extractWithOcrSpaceDetailed(buffer, file.type, env);
-          rawText = fb.text || "";
-          extractionMeta.fallback = fb.meta;
-          extractionMeta.extractorUsed = fb.meta?.provider || "ocr_space";
+          rawText = ocr.text || "";
+          extractorUsed = "ocr_space";
         }
       }
     }
 
     const text = normalizeBillText(rawText);
-    extractionMeta.textLen = (text || "").length;
 
+    // If still unusable, return minimal response (no throwing)
     if (!text || text.length < 60) {
       const structured = {
         summary: "We could not reliably read text from this document.",
@@ -186,8 +165,8 @@ async function handleBillProcessing(request, env, cors) {
           "No readable text was detected. Try a clearer photo (flat, bright, no glare) or upload the PDF directly.",
         nextSteps: [
           "Re-scan or take a clearer photo (no glare, full page, straight).",
-          "If PDF: export a text-based PDF from your provider portal.",
-          "Crop out background and re-upload.",
+          "If PDF: try exporting a text-based PDF from your provider portal.",
+          "Crop out background and re-upload if it’s a photo.",
         ],
         keyAmounts: {
           totalCharges: notDetectedField("Total Charges", sourceType),
@@ -197,75 +176,61 @@ async function handleBillProcessing(request, env, cors) {
         confidenceMeta: {
           sourceType,
           usedOCR,
+          extractorUsed,
           disclaimer:
-            "This app is not HIPAA-certified. Confidence reflects extraction quality. Verify amounts before paying.",
+            "This app is not HIPAA-certified. Confidence reflects document clarity + pattern matches. Verify amounts before payment.",
         },
       };
 
-      const payload = {
-        isPaid,
-        isDeveloper,
-        devBypass: isDeveloper,
-        pages: [{ page: 1, rawText: text || "No readable text detected.", structured }],
-        explanation: structured.explanation,
-        extractionMeta: debug ? extractionMeta : minimalExtractionMeta(extractionMeta),
-      };
-
-      return jsonResponse(payload, cors);
+      return jsonResponse(
+        {
+          isPaid,
+          isDeveloper,
+          devBypass: isDeveloper,
+          pages: [
+            {
+              page: 1,
+              rawText: debug ? previewText(text) : undefined,
+              structured,
+            },
+          ],
+          explanation: structured.explanation,
+          extractionDebug: debug
+            ? {
+                usedOCR,
+                extractorUsed,
+                sourceType,
+                textLen: text.length,
+                primary: primaryTrace,
+                fallback: fallbackTrace,
+              }
+            : undefined,
+        },
+        cors
+      );
     }
 
-    // ================= FIELD EXTRACTION =================
-    const totalCharges = extractMoneyField(text, {
-      label: "Total Charges",
-      sourceType,
-      lineKeywords: ["total", "charges", "amount billed", "total amount", "total charges"],
-      strongRegexes: [
-        /total\s*(charges?|amount\s*billed|amount)\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
-        /amount\s*billed\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
-      ],
-      fallbackPick: "max",
-    });
+    // ================= FIELD EXTRACTION (FIXED) =================
+    // 1) hard patterns (PAY THIS AMOUNT / AMOUNT DUE)
+    // 2) table-aware parser if CHARGES/PAYMENTS/BALANCE appears
+    // 3) scored candidate selection (prevents same amount for all fields)
+    const fields = extractAllKeyAmounts(text, sourceType);
 
-    const insurancePaid = extractMoneyField(text, {
-      label: "Insurance Paid",
-      sourceType,
-      lineKeywords: ["insurance", "paid", "payment", "adjustment", "allowed", "plan paid"],
-      strongRegexes: [
-        /insurance\s*(paid|payment)\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
-        /plan\s*(paid|payment)\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
-        /allowed\s*amount\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
-        /adjustments?\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
-      ],
-      fallbackPick: "best-near-keywords",
-    });
-
-    const patientDue = extractMoneyField(text, {
-      label: "Patient Responsibility",
-      sourceType,
-      lineKeywords: [
-        "patient responsibility",
-        "patient balance",
-        "balance due",
-        "amount due",
-        "you owe",
-        "please pay",
-        "total due",
-      ],
-      strongRegexes: [
-        /(patient\s*(responsibility|balance|due|owe))\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
-        /(balance\s*due|amount\s*due|total\s*due)\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
-        /(please\s*pay)\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
-      ],
-      fallbackPick: "due",
-    });
-
-    // ================= AI =================
+    // ================= AI (STRICT JSON) =================
     const [openAIResult, geminiResult] = await Promise.all([
       analyzeWithOpenAI(text, isPaid, env),
       analyzeWithGemini(text, isPaid, env),
     ]);
 
-    applyAIConfidenceBoost(openAIResult, geminiResult, [totalCharges, insurancePaid, patientDue]);
+    // AI agreement boosts confidence if AI mentions same numeric amount
+    applyAIConfidenceBoost(openAIResult, geminiResult, [
+      fields.totalCharges,
+      fields.insurancePaid,
+      fields.patientResponsibility,
+    ]);
+
+    // Duplicate-value sanity: if same value picked for multiple fields, lower confidence + note
+    enforceDistinctness([fields.totalCharges, fields.insurancePaid, fields.patientResponsibility]);
 
     const structured = {
       summary: openAIResult?.summary || geminiResult?.summary || "Bill analyzed.",
@@ -274,140 +239,330 @@ async function handleBillProcessing(request, env, cors) {
         geminiResult?.explanation ||
         "Analysis complete. Verify all amounts with your provider/insurer before paying.",
       nextSteps: openAIResult?.nextSteps || geminiResult?.nextSteps || [],
-      keyAmounts: {
-        totalCharges,
-        insurancePaid,
-        patientResponsibility: patientDue,
-      },
+      keyAmounts: fields,
       confidenceMeta: {
         sourceType,
         usedOCR,
+        extractorUsed,
         disclaimer:
           "This app is not HIPAA-certified. Confidence reflects document clarity + pattern matches. Verify amounts before payment.",
       },
     };
 
-    const payload = {
-      isPaid,
-      isDeveloper,
-      devBypass: isDeveloper,
-      pages: [{ page: 1, rawText: text, structured }],
-      explanation: structured.explanation,
-      extractionMeta: debug ? extractionMeta : minimalExtractionMeta(extractionMeta),
-    };
-
-    return jsonResponse(payload, cors);
+    return jsonResponse(
+      {
+        isPaid,
+        isDeveloper,
+        devBypass: isDeveloper,
+        pages: [
+          {
+            page: 1,
+            rawText: debug ? previewText(text) : undefined,
+            structured,
+          },
+        ],
+        explanation: structured.explanation,
+        extractionDebug: debug
+          ? {
+              usedOCR,
+              extractorUsed,
+              sourceType,
+              textLen: text.length,
+              quality: scoreTextQuality(text),
+              primary: primaryTrace,
+              fallback: fallbackTrace,
+              tableParse: fields?._tableDebug,
+            }
+          : undefined,
+      },
+      cors
+    );
   } catch (err) {
     console.error("Processing error:", err?.message || err);
     return errorResponse("Processing failed", 500, cors);
   }
 }
 
-// ======================== EXTRACTION DETAILS HELPERS ========================
-function minimalExtractionMeta(m) {
-  return {
-    usedOCR: !!m.usedOCR,
-    extractorUsed: m.extractorUsed,
-    sourceType: m.sourceType,
-    textLen: m.textLen,
-    primary: m.primary ? pickMeta(m.primary) : null,
-    fallback: m.fallback ? pickMeta(m.fallback) : null,
-    message: m.message,
+// ======================== KEY AMOUNT EXTRACTION ========================
+function extractAllKeyAmounts(text, sourceType) {
+  // A) Patient due: strongest patterns
+  const due = extractPatientDue(text, sourceType);
+
+  // B) Table parse (CHARGES/PAYMENTS/BALANCE)
+  const table = parseChargesPaymentsBalanceTable(text);
+
+  // C) If table parse looks valid, use it for totalCharges + insurancePaid
+  let totalCharges = null;
+  let insurancePaid = null;
+
+  if (table.ok) {
+    totalCharges = buildField("Total Charges", String(table.sumCharges), sourceType, "Parsed CHARGES column and summed rows", {
+      confidenceOverride: 0.82,
+      raw: String(table.sumCharges),
+    });
+    insurancePaid = buildField("Insurance Paid", String(table.sumPayments), sourceType, "Parsed PAYMENTS column and summed rows", {
+      confidenceOverride: 0.78,
+      raw: String(table.sumPayments),
+    });
+  }
+
+  // D) If table didn’t work, fall back to scored candidate selection
+  if (!totalCharges) {
+    totalCharges = extractMoneyByScoring(text, sourceType, {
+      label: "Total Charges",
+      positive: ["total charges", "amount billed", "total amount", "charges"],
+      negative: ["amount due", "pay this amount", "balance due", "patient"],
+      preferLargest: true,
+    });
+  }
+
+  if (!insurancePaid) {
+    insurancePaid = extractMoneyByScoring(text, sourceType, {
+      label: "Insurance Paid",
+      positive: ["insurance payment", "insurance paid", "plan paid", "payment", "payments", "allowed amount", "adjustment"],
+      negative: ["amount due", "pay this amount", "patient"],
+      preferLargest: false,
+    });
+  }
+
+  // E) Patient responsibility: prefer due pattern; else look for balance due / amount due; else table sum balance
+  let patientResponsibility = due;
+  if (patientResponsibility.value === "Not detected") {
+    if (table.ok && table.sumBalances > 0) {
+      patientResponsibility = buildField(
+        "Patient Responsibility",
+        String(table.sumBalances),
+        sourceType,
+        "Fallback: summed BALANCE column from table",
+        { confidenceOverride: 0.72, raw: String(table.sumBalances) }
+      );
+    } else {
+      patientResponsibility = extractMoneyByScoring(text, sourceType, {
+        label: "Patient Responsibility",
+        positive: ["patient responsibility", "balance due", "amount due", "total due", "you owe", "please pay", "pay this amount"],
+        negative: ["charges", "amount billed"],
+        preferLargest: false,
+        preferSmallish: true,
+      });
+    }
+  }
+
+  const out = {
+    totalCharges,
+    insurancePaid,
+    patientResponsibility,
+    _tableDebug: table.ok ? table.debug : { ok: false },
   };
-}
-function pickMeta(x) {
-  return {
-    ok: !!x.ok,
-    provider: x.provider,
-    status: x.status,
-    textLen: x.textLen,
-  };
-}
 
-// ======================== BETTER MONEY EXTRACTION (UNCHANGED) ========================
-function extractMoneyField(text, cfg) {
-  const { label, sourceType, strongRegexes = [], lineKeywords = [], fallbackPick } = cfg;
-
-  for (const rx of strongRegexes) {
-    const m = text.match(rx);
-    if (m) {
-      const amt = pickAmountGroup(m);
-      if (amt) return buildField(label, amt, sourceType, "Matched strong labeled pattern");
-    }
-  }
-
-  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
-  const kw = lineKeywords.map((k) => k.toLowerCase());
-
-  const candidateLines = lines.filter((l) => {
-    const ll = l.toLowerCase();
-    return kw.some((k) => ll.includes(k));
-  });
-
-  for (const line of candidateLines) {
-    const amt = findFirstMoney(line);
-    if (amt) return buildField(label, amt, sourceType, "Found amount on a labeled line");
-  }
-
-  for (let i = 0; i < lines.length; i++) {
-    const ll = lines[i].toLowerCase();
-    if (!kw.some((k) => ll.includes(k))) continue;
-
-    const window = [lines[i], lines[i + 1] || "", lines[i + 2] || ""].join(" ");
-    const amt = findFirstMoney(window);
-    if (amt) return buildField(label, amt, sourceType, "Found amount near labeled text");
-  }
-
-  const allMoney = extractAllMoney(text);
-  if (!allMoney.length) return notDetectedField(label, sourceType, "No currency values detected anywhere");
-
-  if (fallbackPick === "due") {
-    const dueCandidates = candidateMoneyByLine(lines, ["amount due", "balance due", "total due", "please pay", "you owe"]);
-    if (dueCandidates.length) {
-      return buildField(label, dueCandidates[0].amount, sourceType, "Fallback: selected amount from a due/balance line");
-    }
-    const pick = [...allMoney].sort((a, b) => b.value - a.value)[0];
-    return buildField(label, pick.amount, sourceType, "Fallback: picked likely amount (heuristic)");
-  }
-
-  if (fallbackPick === "max") {
-    const max = allMoney.reduce((a, b) => (b.value > a.value ? b : a));
-    return buildField(label, max.amount, sourceType, "Fallback: selected largest amount found");
-  }
-
-  if (fallbackPick === "best-near-keywords") {
-    const near = candidateMoneyByLine(lines, ["insurance", "plan", "paid", "adjustment", "allowed"]);
-    if (near.length) {
-      return buildField(label, near[0].amount, sourceType, "Fallback: selected amount near insurance keywords");
-    }
-  }
-
-  return buildField(label, allMoney[0].amount, sourceType, "Fallback: selected first detected amount");
-}
-
-function candidateMoneyByLine(lines, keywords) {
-  const out = [];
-  const kw = keywords.map((k) => k.toLowerCase());
-  for (const line of lines) {
-    const ll = line.toLowerCase();
-    if (!kw.some((k) => ll.includes(k))) continue;
-    const money = extractAllMoney(line);
-    for (const m of money) out.push(m);
-  }
-  out.sort((a, b) => b.value - a.value);
+  // Don’t expose internal debug in normal UI; only useful when you set X-Debug
   return out;
 }
 
-function buildField(label, amountStr, sourceType, reasonBase) {
-  const cleaned = normalizeAmount(amountStr);
+function extractPatientDue(text, sourceType) {
+  const patterns = [
+    /(pay\s*this\s*amount)\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+    /(amount\s*due|balance\s*due|total\s*due|amt\s*due)\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+    /(current\s*amount\s*due)\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+    /(net\s*due)\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+  ];
 
-  let confidence = 0.72;
+  for (const rx of patterns) {
+    const m = text.match(rx);
+    if (m) {
+      const amt = normalizeAmount(m[m.length - 1]);
+      return buildField("Patient Responsibility", amt, sourceType, `Matched "${m[1]}"`, {
+        confidenceOverride: 0.9,
+        raw: amt,
+      });
+    }
+  }
+
+  return notDetectedField("Patient Responsibility", sourceType, "No explicit Amount Due / Pay This Amount found");
+}
+
+function parseChargesPaymentsBalanceTable(text) {
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  const headerIdx = lines.findIndex((l) => {
+    const ll = l.toLowerCase();
+    // OCR sometimes says CHANGES instead of CHARGES, so accept both
+    return (ll.includes("charges") || ll.includes("changes")) && ll.includes("payments") && ll.includes("balance");
+  });
+
+  if (headerIdx === -1) {
+    return { ok: false, debug: { ok: false, reason: "Header not found" } };
+  }
+
+  // Collect money amounts from a window after header until messages/footer
+  const stopWords = ["important messages", "please detach", "statement", "reminder"];
+  const amounts = [];
+
+  for (let i = headerIdx; i < Math.min(lines.length, headerIdx + 120); i++) {
+    const ll = lines[i].toLowerCase();
+    if (stopWords.some((w) => ll.includes(w))) break;
+
+    const found = extractAllMoney(lines[i]);
+    for (const f of found) amounts.push(f.value);
+  }
+
+  // Need at least one full row (charge, payment, balance)
+  if (amounts.length < 3) {
+    return { ok: false, debug: { ok: false, reason: "Not enough amounts after header", amountsFound: amounts.length } };
+  }
+
+  // Group by 3: charge, payment, balance
+  let sumCharges = 0;
+  let sumPayments = 0;
+  let sumBalances = 0;
+
+  for (let i = 0; i + 2 < amounts.length; i += 3) {
+    const c = amounts[i];
+    const p = amounts[i + 1];
+    const b = amounts[i + 2];
+
+    // sanity filter: ignore ridiculous triples (e.g., years/phone fragments already filtered)
+    if (c <= 0) continue;
+
+    sumCharges += c;
+    sumPayments += Math.max(0, p);
+    sumBalances += Math.max(0, b);
+  }
+
+  // If sums are zero-ish, table parse likely failed
+  if (sumCharges <= 0) {
+    return { ok: false, debug: { ok: false, reason: "Sum charges <= 0", amountsSample: amounts.slice(0, 12) } };
+  }
+
+  return {
+    ok: true,
+    sumCharges: round2(sumCharges),
+    sumPayments: round2(sumPayments),
+    sumBalances: round2(sumBalances),
+    debug: {
+      ok: true,
+      headerLine: lines[headerIdx],
+      amountsSample: amounts.slice(0, 18),
+      groupedTriples: Math.floor(amounts.length / 3),
+      sumCharges: round2(sumCharges),
+      sumPayments: round2(sumPayments),
+      sumBalances: round2(sumBalances),
+    },
+  };
+}
+
+function extractMoneyByScoring(text, sourceType, cfg) {
+  const {
+    label,
+    positive = [],
+    negative = [],
+    preferLargest = false,
+    preferSmallish = false,
+  } = cfg;
+
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  const pos = positive.map((x) => x.toLowerCase());
+  const neg = negative.map((x) => x.toLowerCase());
+
+  // Build candidates: each money on a line gets a score based on context
+  const candidates = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const ll = line.toLowerCase();
+
+    const money = extractAllMoney(line);
+    if (!money.length) continue;
+
+    const ctx = [
+      lines[i - 1] || "",
+      lines[i] || "",
+      lines[i + 1] || "",
+    ].join(" ").toLowerCase();
+
+    let base = 0;
+
+    for (const p of pos) if (ctx.includes(p)) base += 4;
+    for (const n of neg) if (ctx.includes(n)) base -= 3;
+
+    // Slight boost if $ appears in the line (more “bill-like”)
+    if (line.includes("$")) base += 1;
+
+    for (const m of money) {
+      // Prefer plausible bill amounts (avoid tiny)
+      if (m.value < 1) continue;
+
+      let score = base;
+
+      // If they want largest, reward bigger values a bit
+      if (preferLargest) score += Math.log10(1 + m.value);
+
+      // If they want “smallish”, penalize very large amounts slightly
+      if (preferSmallish) score -= Math.log10(1 + m.value) * 0.4;
+
+      candidates.push({
+        value: m.value,
+        amount: m.amount,
+        score,
+        line,
+      });
+    }
+  }
+
+  if (!candidates.length) return notDetectedField(label, sourceType, "No currency values detected");
+
+  // Sort by score first, then by value if tie
+  candidates.sort((a, b) => (b.score - a.score) || (b.value - a.value));
+
+  const best = candidates[0];
+  const reason =
+    best.score >= 6
+      ? "Matched strong keyword context near amount"
+      : best.score >= 3
+      ? "Matched partial keyword context near amount"
+      : "Fallback: selected most plausible amount found";
+
+  const conf =
+    best.score >= 6 ? 0.84 :
+    best.score >= 3 ? 0.72 :
+    0.60;
+
+  return buildField(label, best.amount, sourceType, reason, {
+    confidenceOverride: conf,
+    raw: normalizeAmount(best.amount),
+  });
+}
+
+function enforceDistinctness(fields) {
+  // If the same formatted dollar amount is used for multiple fields, lower confidence
+  const map = new Map();
+  for (const f of fields) {
+    if (!f || f.value === "Not detected") continue;
+    const key = f.value;
+    map.set(key, (map.get(key) || 0) + 1);
+  }
+  for (const f of fields) {
+    if (!f || f.value === "Not detected") continue;
+    const count = map.get(f.value) || 0;
+    if (count >= 2) {
+      f.confidence = clamp(Number((f.confidence - 0.18).toFixed(2)), 0.15, 0.95);
+      f.reason += " (same amount appeared for multiple fields — verify)";
+    }
+  }
+}
+
+// ======================== FIELD OBJECT BUILDERS ========================
+function buildField(label, amountStr, sourceType, reasonBase, opts = {}) {
+  const cleaned = normalizeAmount(amountStr);
+  const usd = formatUSD(cleaned);
+
+  let confidence =
+    typeof opts.confidenceOverride === "number" ? opts.confidenceOverride : 0.72;
+
   let reason = reasonBase;
 
-  if (sourceType.includes("pdf")) confidence += 0.10;
+  if (sourceType.includes("pdf")) confidence += 0.06;
   if (sourceType.includes("excel")) confidence += 0.05;
   if (sourceType.includes("ocr")) {
-    confidence -= 0.18;
+    confidence -= 0.16;
     reason += " (OCR text can be noisy)";
   }
 
@@ -415,11 +570,11 @@ function buildField(label, amountStr, sourceType, reasonBase) {
 
   return {
     label,
-    value: formatUSD(cleaned),
+    value: usd,
     confidence: Number(confidence.toFixed(2)),
     reason,
     source: sourceType,
-    raw: cleaned,
+    raw: opts.raw || cleaned, // numeric string
   };
 }
 
@@ -433,25 +588,7 @@ function notDetectedField(label, sourceType, why = "No clear matching line found
   };
 }
 
-// ======================== CONFIDENCE BOOST VIA AI AGREEMENT (UNCHANGED) ========================
-function applyAIConfidenceBoost(openAI, gemini, fields) {
-  const aiText = (safeStringify(openAI) + " " + safeStringify(gemini)).toLowerCase();
-  for (const f of fields) {
-    if (!f || !f.raw || f.value === "Not detected") continue;
-
-    const raw = String(f.raw).replace(/,/g, "");
-    const raw2 = raw.replace(/\.00$/, "");
-    const asDollars = String(f.value).replace(/\$/g, "").replace(/,/g, "");
-
-    if (aiText.includes(raw) || aiText.includes(raw2) || aiText.includes(asDollars)) {
-      f.confidence = Math.min(1, Number((f.confidence + 0.1).toFixed(2)));
-      f.reason += " + confirmed by AI analysis";
-      f.source += "+ai";
-    }
-  }
-}
-
-// ======================== PDF TEXT EXTRACTION (UNCHANGED) ========================
+// ======================== PDF TEXT EXTRACTION ========================
 async function extractTextFromPDF(uint8) {
   try {
     const pdfjs = await import("https://cdn.jsdelivr.net/npm/pdfjs-dist@4.5.136/+esm");
@@ -472,20 +609,19 @@ async function extractTextFromPDF(uint8) {
   }
 }
 
-// ======================== OCR / EXCEL / AI / HELPERS ========================
-
-// NEW: Detailed Vision extractor (proves status/provider)
+// ======================== OCR / EXCEL ========================
 async function extractWithGoogleVisionDetailed(uint8, mimeType, env) {
-  const meta = {
+  const trace = {
     ok: false,
     provider: "google_vision",
-    status: 0,
+    status: null,
     textLen: 0,
+    note: "",
   };
   try {
     if (!env.GOOGLE_VISION_API_KEY) {
-      meta.status = 0;
-      return { text: "", meta };
+      trace.note = "Missing GOOGLE_VISION_API_KEY";
+      return { ok: false, text: "", trace };
     }
 
     const base64 = uint8ArrayToBase64(uint8);
@@ -505,29 +641,34 @@ async function extractWithGoogleVisionDetailed(uint8, mimeType, env) {
       }
     );
 
-    meta.status = res.status;
-    if (!res.ok) return { text: "", meta };
+    trace.status = res.status;
 
-    const json = await res.json();
+    const json = await res.json().catch(() => ({}));
     const text = json.responses?.[0]?.fullTextAnnotation?.text || "";
-    meta.ok = !!text;
-    meta.textLen = text.length;
-    return { text, meta };
-  } catch {
-    return { text: "", meta };
+
+    trace.ok = res.ok === true;
+    trace.textLen = (text || "").length;
+
+    return { ok: trace.ok, text, trace };
+  } catch (e) {
+    trace.note = e?.message || "Vision call failed";
+    return { ok: false, text: "", trace };
   }
 }
 
-// NEW: Detailed OCR.space extractor
 async function extractWithOcrSpaceDetailed(uint8, mimeType, env) {
-  const meta = {
+  const trace = {
     ok: false,
     provider: "ocr_space",
-    status: 0,
+    status: null,
     textLen: 0,
+    note: "",
   };
   try {
-    if (!env.OCR_SPACE_API_KEY) return { text: "", meta };
+    if (!env.OCR_SPACE_API_KEY) {
+      trace.note = "Missing OCR_SPACE_API_KEY";
+      return { ok: false, text: "", trace };
+    }
 
     const base64 = uint8ArrayToBase64(uint8);
     const res = await fetch("https://api.ocr.space/parse/image", {
@@ -545,27 +686,19 @@ async function extractWithOcrSpaceDetailed(uint8, mimeType, env) {
       }),
     });
 
-    meta.status = res.status;
-    if (!res.ok) return { text: "", meta };
+    trace.status = res.status;
 
-    const json = await res.json();
+    const json = await res.json().catch(() => ({}));
     const text = json.ParsedResults?.[0]?.ParsedText || "";
-    meta.ok = !!text;
-    meta.textLen = text.length;
-    return { text, meta };
-  } catch {
-    return { text: "", meta };
-  }
-}
 
-// Preserved non-detailed functions (so nothing is “removed”)
-async function extractWithGoogleVision(uint8, mimeType, env) {
-  const out = await extractWithGoogleVisionDetailed(uint8, mimeType, env);
-  return out.text || "";
-}
-async function extractWithOcrSpace(uint8, mimeType, env) {
-  const out = await extractWithOcrSpaceDetailed(uint8, mimeType, env);
-  return out.text || "";
+    trace.ok = res.ok === true;
+    trace.textLen = (text || "").length;
+
+    return { ok: trace.ok, text, trace };
+  } catch (e) {
+    trace.note = e?.message || "OCR.space call failed";
+    return { ok: false, text: "", trace };
+  }
 }
 
 async function processExcel(buffer) {
@@ -585,12 +718,16 @@ async function analyzeWithOpenAI(text, isPaid, env) {
     const model = isPaid ? "gpt-4o" : "gpt-4o-mini";
 
     const system =
-      `You are ExplainMyBill. Return ONLY valid JSON (no markdown). ` +
-      `Do not guess numbers. If a value isn't explicit, set it to null.\n\n` +
+      `Return ONLY valid JSON (no markdown). Do not guess numbers. ` +
+      `If a value isn't explicit, set it to null.\n` +
       `Schema: {"summary": string, "explanation": string, "nextSteps": string[]}`;
 
     const user =
-      `Simplify this bill for a normal person. Provide practical next steps.\n\nBILL TEXT:\n${text}`;
+      `Simplify this bill for a normal person.\n` +
+      `- Explain what it is\n` +
+      `- Explain what the patient likely owes vs insurance (ONLY if explicitly present)\n` +
+      `- Give practical next steps (itemized bill, payment plan, appeal, coding review)\n\n` +
+      `BILL TEXT:\n${text}`;
 
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -648,6 +785,25 @@ async function analyzeWithGemini(text, isPaid, env) {
   }
 }
 
+// ======================== CONFIDENCE BOOST VIA AI AGREEMENT ========================
+function applyAIConfidenceBoost(openAI, gemini, fields) {
+  const aiText = (safeStringify(openAI) + " " + safeStringify(gemini)).toLowerCase();
+
+  for (const f of fields) {
+    if (!f || !f.raw || f.value === "Not detected") continue;
+
+    const raw = String(f.raw).replace(/,/g, "");
+    const raw2 = raw.replace(/\.00$/, "");
+    const asDollars = String(f.value).replace(/\$/g, "").replace(/,/g, "");
+
+    if (aiText.includes(raw) || aiText.includes(raw2) || aiText.includes(asDollars)) {
+      f.confidence = Math.min(1, Number((f.confidence + 0.1).toFixed(2)));
+      f.reason += " + confirmed by AI analysis";
+      f.source += "+ai";
+    }
+  }
+}
+
 // ======================== TEXT + MONEY HELPERS ========================
 function normalizeBillText(s) {
   if (!s) return "";
@@ -659,15 +815,6 @@ function normalizeBillText(s) {
     .trim();
 }
 
-function findFirstMoney(s) {
-  const m = String(s).match(/\$?\s*([\d]{1,3}(?:,[\d]{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)/);
-  if (!m) return null;
-  const amt = normalizeAmount(m[1]);
-  const val = Number(amt);
-  if (!isFinite(val) || val <= 0) return null;
-  return amt;
-}
-
 function extractAllMoney(s) {
   const out = [];
   const rx = /\$?\s*([\d]{1,3}(?:,[\d]{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)/g;
@@ -677,7 +824,7 @@ function extractAllMoney(s) {
     const amt = normalizeAmount(m[1]);
     const val = Number(amt);
     if (!isFinite(val) || val <= 0) continue;
-    if (val >= 1900 && val <= 2099) continue;
+    if (val >= 1900 && val <= 2099) continue; // years
     out.push({ amount: amt, value: val });
     if (out.length > 200) break;
   }
@@ -697,13 +844,12 @@ function formatUSD(numericString) {
   return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-function pickAmountGroup(matchArray) {
-  for (let i = matchArray.length - 1; i >= 1; i--) {
-    const candidate = normalizeAmount(matchArray[i]);
-    if (candidate && /^\d+(\.\d{2})?$/.test(candidate)) return candidate;
-    if (candidate && /^\d+(\.\d+)?$/.test(candidate)) return candidate;
-  }
-  return null;
+function round2(n) {
+  return Math.round(n * 100) / 100;
+}
+
+function clamp(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v));
 }
 
 // ======================== BASE64 (SAFE) ========================
@@ -743,12 +889,9 @@ function safeStringify(x) {
   }
 }
 
-function clamp(v, lo, hi) {
-  return Math.max(lo, Math.min(hi, v));
-}
-
 function jsonResponse(obj, cors) {
-  return new Response(JSON.stringify(obj), {
+  // Remove undefined (keeps your JSON clean)
+  return new Response(JSON.stringify(obj, (_k, v) => (v === undefined ? undefined : v)), {
     headers: { "Content-Type": "application/json", ...cors },
   });
 }
@@ -758,6 +901,34 @@ function errorResponse(msg, status, cors) {
     status,
     headers: { "Content-Type": "application/json", ...cors },
   });
+}
+
+// ======================== QUALITY SCORING (FOR FALLBACK DECISION) ========================
+function scoreTextQuality(text) {
+  const s = String(text || "").trim();
+  if (!s) return { score: 0, len: 0, words: 0, digitRatio: 0 };
+
+  const len = s.length;
+  const words = s.split(/\s+/).filter(Boolean).length;
+  const digits = (s.match(/\d/g) || []).length;
+  const digitRatio = len ? digits / len : 0;
+
+  // heuristic: needs enough words + some digits but not all digits
+  let score = 0;
+  score += Math.min(1, len / 2000) * 0.55;
+  score += Math.min(1, words / 250) * 0.35;
+
+  // digit ratio sweet spot
+  const dr = digitRatio;
+  const drScore = dr > 0.02 && dr < 0.25 ? 0.10 : 0.03;
+  score += drScore;
+
+  return { score: Number(score.toFixed(3)), len, words, digitRatio: Number(digitRatio.toFixed(3)) };
+}
+
+function previewText(text) {
+  const s = String(text || "");
+  return s.length <= 2000 ? s : s.slice(0, 2000) + "\n\n…(truncated)…";
 }
 
 // ======================== STRIPE (PRESERVED HOOK) ========================

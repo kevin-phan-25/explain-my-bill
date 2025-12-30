@@ -6,6 +6,9 @@
 // ✅ No data retention • Not HIPAA-certified • Privacy-first
 // ✅ Every line preserved and merged — nothing removed
 
+// ✅ FIX: Stripe import was missing (Stripe is used below)
+import Stripe from "stripe";
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -123,7 +126,9 @@ async function handleStripeCheckout(request, env, corsHeaders) {
       mode: mode === "payment" ? "payment" : "subscription",
       payment_method_types: ["card"],
       line_items: [{ price: priceId, quantity: 1 }],
-      success_url: `${body.successUrl || "https://explain-my-bill-frontend.onrender.com"}/success?session_id={CHECKOUT_SESSION_ID}`,
+      success_url: `${
+        body.successUrl || "https://explain-my-bill-frontend.onrender.com"
+      }/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: body.cancelUrl || "https://explain-my-bill-frontend.onrender.com/cancel",
       metadata: {
         user_agent: request.headers.get("user-agent") || "unknown",
@@ -139,7 +144,9 @@ async function handleStripeCheckout(request, env, corsHeaders) {
 
 // ======================== MASSIVELY EXPANDED & ACCURATE 2025 OVERCHARGE BENCHMARKS ========================
 function detectOvercharges(billResult) {
-  const total = parseFloat(billResult.structured.keyAmounts.totalCharges.raw || 0);
+  // ✅ FIX: guard for missing nested fields so this never crashes & returns usable output
+  const rawTotal = billResult?.structured?.keyAmounts?.totalCharges?.raw || 0;
+  const total = parseFloat(rawTotal || 0);
   const flags = [];
 
   const benchmarks = {
@@ -206,7 +213,7 @@ function detectOvercharges(billResult) {
   if (total > benchmarks.cardiacStent * 1.5) flags.push(`Cardiac stent high (avg ~$38,000)`);
 
   return {
-    totalCharged: billResult.structured.keyAmounts.totalCharges.value,
+    totalCharged: billResult?.structured?.keyAmounts?.totalCharges?.value || "Not detected",
     flags: flags.length > 0 ? flags : ["No major overcharges detected vs national averages"],
     note: "Based on FAIR Health, Medicare, and CMS data (2025 estimates). Not a guarantee.",
   };
@@ -422,7 +429,11 @@ async function processSingleBill(file, env) {
   const insurancePaid = pickFinalField(
     "Insurance Paid",
     aiMerged?.fields?.insurancePaid,
-    extractMoneyField(text, { label: "Insurance Paid", sourceType, fallbackPick: "best-near-keywords" }),
+    extractMoneyField(text, {
+      label: "Insurance Paid",
+      sourceType,
+      fallbackPick: "best-near-keywords",
+    }),
     sourceType
   );
   const patientResponsibility = pickFinalField(
@@ -457,7 +468,9 @@ function compareBills(provider, eob) {
   let severity = "info";
 
   if (Math.abs(pTotal - eTotal) > 5) {
-    discrepancies.push(`Total charges differ: Provider says ${p.totalCharges.value}, EOB says ${e.totalCharges.value}`);
+    discrepancies.push(
+      `Total charges differ: Provider says ${p.totalCharges.value}, EOB says ${e.totalCharges.value}`
+    );
   }
 
   if (e.patientResponsibility.value !== "Not detected") {
@@ -472,7 +485,8 @@ function compareBills(provider, eob) {
       severity = "success";
     }
   } else {
-    mainMessage = "We found your EOB but couldn't locate the final patient responsibility. Look for 'Amount You Owe' or 'Patient Balance'.";
+    mainMessage =
+      "We found your EOB but couldn't locate the final patient responsibility. Look for 'Amount You Owe' or 'Patient Balance'.";
     severity = "warning";
   }
 
@@ -641,11 +655,26 @@ async function handleBillProcessing(request, env, corsHeaders) {
       label: "Total Charges",
       sourceType: extraction.sourceType || sourceType,
       lineKeywords: [
-        "total charges", "total billed", "provider charges", "amount billed",
-        "statement total", "billed amount", "total amount", "charges",
-        "billed charges", "charges total", "total services", "services total",
-        "total cost", "cost total", "grand total", "subtotal charges",
-        "original charges", "full charges", "provider billed", "facility charges"
+        "total charges",
+        "total billed",
+        "provider charges",
+        "amount billed",
+        "statement total",
+        "billed amount",
+        "total amount",
+        "charges",
+        "billed charges",
+        "charges total",
+        "total services",
+        "services total",
+        "total cost",
+        "cost total",
+        "grand total",
+        "subtotal charges",
+        "original charges",
+        "full charges",
+        "provider billed",
+        "facility charges",
       ],
       strongRegexes: [
         /total\s*(charges?|billed|provider\s*charges|amount\s*billed|statement\s*total)\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
@@ -668,12 +697,30 @@ async function handleBillProcessing(request, env, corsHeaders) {
       label: "Insurance Paid",
       sourceType: extraction.sourceType || sourceType,
       lineKeywords: [
-        "insurance paid", "plan paid", "insurance payment", "plan payment",
-        "adjustments", "contractual adjustment", "allowed amount", "write-off",
-        "your plan paid", "plan payments", "paid by insurance", "insurance adjustment",
-        "payments from plan", "plan allowance", "contractual allowance", "insurance discount",
-        "discount from insurance", "paid by plan", "insurer paid", "carrier paid",
-        "benefits paid", "covered amount", "reimbursed amount", "reimbursement"
+        "insurance paid",
+        "plan paid",
+        "insurance payment",
+        "plan payment",
+        "adjustments",
+        "contractual adjustment",
+        "allowed amount",
+        "write-off",
+        "your plan paid",
+        "plan payments",
+        "paid by insurance",
+        "insurance adjustment",
+        "payments from plan",
+        "plan allowance",
+        "contractual allowance",
+        "insurance discount",
+        "discount from insurance",
+        "paid by plan",
+        "insurer paid",
+        "carrier paid",
+        "benefits paid",
+        "covered amount",
+        "reimbursed amount",
+        "reimbursement",
       ],
       strongRegexes: [
         /(insurance|plan)\s*(paid|payment)\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
@@ -698,14 +745,36 @@ async function handleBillProcessing(request, env, corsHeaders) {
     const regexPatientDue = extractMoneyField(text, {
       label: "Patient Responsibility",
       sourceType: extraction.sourceType || sourceType,
+      // ✅ FIX: allow $0.00 to be a valid “patient owes” (common for EOBs)
+      allowZero: true,
       lineKeywords: [
-        "patient responsibility", "patient balance", "balance due", "amount due",
-        "you owe", "please pay", "pay this amount", "amount you may owe",
-        "total due", "amt due", "net due", "patient due",
-        "amount you owe", "due from patient", "patient amount", "patient pay",
-        "patient co-pay", "coinsurance due", "deductible due", "out-of-pocket",
-        "patient portion", "your responsibility", "member responsibility",
-        "member balance", "patient owed", "owed by patient", "patient liability"
+        "patient responsibility",
+        "patient balance",
+        "balance due",
+        "amount due",
+        "you owe",
+        "please pay",
+        "pay this amount",
+        "amount you may owe",
+        "total due",
+        "amt due",
+        "net due",
+        "patient due",
+        "amount you owe",
+        "due from patient",
+        "patient amount",
+        "patient pay",
+        "patient co-pay",
+        "coinsurance due",
+        "deductible due",
+        "out-of-pocket",
+        "patient portion",
+        "your responsibility",
+        "member responsibility",
+        "member balance",
+        "patient owed",
+        "owed by patient",
+        "patient liability",
       ],
       strongRegexes: [
         /(patient\s*(responsibility|balance|due|owe))\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
@@ -753,13 +822,14 @@ async function handleBillProcessing(request, env, corsHeaders) {
     const structured = {
       summary: aiMerged?.summary || getSmartSummary(totalCharges, insurancePaid, patientResponsibility),
       explanation: aiMerged?.explanation || getCalmExplanation(totalCharges, insurancePaid, patientResponsibility),
-      nextSteps: aiMerged?.nextSteps?.length > 0
-        ? aiMerged.nextSteps
-        : [
-            "Check your Explanation of Benefits (EOB) from your insurance — that shows what you actually owe.",
-            "Call the billing phone number on the statement if anything looks wrong.",
-            "Save this report and compare it to any payment requests you receive.",
-          ],
+      nextSteps:
+        aiMerged?.nextSteps?.length > 0
+          ? aiMerged.nextSteps
+          : [
+              "Check your Explanation of Benefits (EOB) from your insurance — that shows what you actually owe.",
+              "Call the billing phone number on the statement if anything looks wrong.",
+              "Save this report and compare it to any payment requests you receive.",
+            ],
       keyAmounts: {
         totalCharges,
         insurancePaid,
@@ -783,7 +853,8 @@ async function handleBillProcessing(request, env, corsHeaders) {
         isPaid,
         isDeveloper,
         extraction,
-        privacyNote: "Your bill is processed transiently in memory only. No data is stored, logged, or shared with anyone. We never retain your document.",
+        privacyNote:
+          "Your bill is processed transiently in memory only. No data is stored, logged, or shared with anyone. We never retain your document.",
         pages: [{ page: 1, rawText: text, structured }],
         explanation: structured.explanation,
       },
@@ -935,7 +1006,12 @@ function mergeAIResults(openAI, gemini) {
 }
 
 function pickFinalField(label, aiField, regexField, sourceType) {
-  if (aiField && isFiniteNumber(aiField.amount) && Array.isArray(aiField.citations) && aiField.citations.length) {
+  if (
+    aiField &&
+    isFiniteNumber(aiField.amount) &&
+    Array.isArray(aiField.citations) &&
+    aiField.citations.length
+  ) {
     const amt = Number(aiField.amount);
     return buildFieldWithCitations(label, amt, sourceType, {
       reasonBase: "AI extracted with direct evidence citations",
@@ -1070,13 +1146,23 @@ async function extractWithGoogleVision(uint8, mimeType, env, extraction) {
     if (!res.ok) return { text: "", status };
     const json = await res.json();
     const text = json.responses?.[0]?.fullTextAnnotation?.text || "";
+
+    // ✅ FIX: if extraction object passed, populate it safely (no breaking changes)
+    if (extraction && typeof extraction === "object") {
+      extraction.primary = extraction.primary || { ok: false, provider: "none", status: null, textLen: 0 };
+      extraction.primary.ok = !!text;
+      extraction.primary.provider = "google_vision";
+      extraction.primary.status = status;
+      extraction.primary.textLen = (text || "").length;
+    }
+
     return { text, status };
   } catch {
     return { text: "", status: 0 };
   }
 }
 
-async function extractWithOcrSpace(uint8, mimeType, env) {
+async function extractWithOcrSpace(uint8, mimeType, env, extraction) {
   try {
     if (!env.OCR_SPACE_API_KEY) return { text: "", status: 0 };
     const base64 = uint8ArrayToBase64(uint8);
@@ -1098,6 +1184,16 @@ async function extractWithOcrSpace(uint8, mimeType, env) {
     if (!res.ok) return { text: "", status };
     const json = await res.json();
     const text = json.ParsedResults?.[0]?.ParsedText || "";
+
+    // ✅ FIX: if extraction object passed, populate it safely (no breaking changes)
+    if (extraction && typeof extraction === "object") {
+      extraction.fallback = extraction.fallback || { ok: false, provider: "none", status: null, textLen: 0 };
+      extraction.fallback.ok = !!text;
+      extraction.fallback.provider = "ocr_space";
+      extraction.fallback.status = status;
+      extraction.fallback.textLen = (text || "").length;
+    }
+
     return { text, status };
   } catch {
     return { text: "", status: 0 };
@@ -1129,23 +1225,30 @@ function extractMoneyField(text, cfg) {
     return kw.some((k) => ll.includes(k));
   });
   for (const line of candidateLines) {
-    const amt = findFirstMoney(line);
-    if (amt) return buildField(label, amt, sourceType, "Found amount on labeled line");
+    const amt = findFirstMoney(line, cfg);
+    if (amt !== null && amt !== undefined) return buildField(label, amt, sourceType, "Found amount on labeled line");
   }
   for (let i = 0; i < lines.length; i++) {
     const ll = lines[i].toLowerCase();
     if (!kw.some((k) => ll.includes(k))) continue;
     const window = [lines[i], lines[i + 1] || "", lines[i + 2] || ""].join(" ");
-    const amt = findFirstMoney(window);
-    if (amt) return buildField(label, amt, sourceType, "Found amount near labeled text");
+    const amt = findFirstMoney(window, cfg);
+    if (amt !== null && amt !== undefined) return buildField(label, amt, sourceType, "Found amount near labeled text");
   }
-  const allMoney = extractAllMoney(text);
+  const allMoney = extractAllMoney(text, cfg);
   if (!allMoney.length) return notDetectedField(label, sourceType, "No currency values detected");
   if (fallbackPick === "due") {
     const dueCandidates = candidateMoneyByLine(lines, [
-      "amount due", "balance due", "total due", "please pay", "you owe",
-      "net due", "amt due", "pay this amount", "amount you may owe"
-    ]);
+      "amount due",
+      "balance due",
+      "total due",
+      "please pay",
+      "you owe",
+      "net due",
+      "amt due",
+      "pay this amount",
+      "amount you may owe",
+    ], cfg);
     if (dueCandidates.length) {
       return buildField(label, dueCandidates[0].amount, sourceType, "Fallback: selected due/balance amount");
     }
@@ -1157,7 +1260,7 @@ function extractMoneyField(text, cfg) {
     return buildField(label, max.amount, sourceType, "Fallback: selected largest amount");
   }
   if (fallbackPick === "best-near-keywords") {
-    const near = candidateMoneyByLine(lines, ["insurance", "plan", "paid", "adjustment", "allowed", "write-off"]);
+    const near = candidateMoneyByLine(lines, ["insurance", "plan", "paid", "adjustment", "allowed", "write-off"], cfg);
     if (near.length) {
       return buildField(label, near[0].amount, sourceType, "Fallback: amount near insurance keywords");
     }
@@ -1165,13 +1268,13 @@ function extractMoneyField(text, cfg) {
   return buildField(label, allMoney[0].amount, sourceType, "Fallback: first detected amount");
 }
 
-function candidateMoneyByLine(lines, keywords) {
+function candidateMoneyByLine(lines, keywords, cfg) {
   const out = [];
   const kw = keywords.map((k) => k.toLowerCase());
   for (const line of lines) {
     const ll = line.toLowerCase();
     if (!kw.some((k) => ll.includes(k))) continue;
-    const money = extractAllMoney(line);
+    const money = extractAllMoney(line, cfg);
     for (const m of money) out.push(m);
   }
   out.sort((a, b) => b.value - a.value);
@@ -1232,16 +1335,22 @@ function toNumberedLines(text) {
   return capped.map((l, i) => `${i + 1}. ${l}`).join("\n");
 }
 
-function findFirstMoney(s) {
+function findFirstMoney(s, cfg) {
   const m = String(s).match(/\$?\s*([\d]{1,3}(?:,[\d]{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)/);
   if (!m) return null;
   const amt = normalizeAmount(m[1]);
   const val = Number(amt);
-  if (!isFinite(val) || val <= 0) return null;
+  if (!isFinite(val)) return null;
+
+  // ✅ FIX: allow $0.00 when configured (common for EOB “you owe”)
+  const allowZero = !!cfg?.allowZero;
+  if (!allowZero && val <= 0) return null;
+  if (allowZero && val < 0) return null;
+
   return amt;
 }
 
-function extractAllMoney(s) {
+function extractAllMoney(s, cfg) {
   const out = [];
   const rx = /\$?\s*([\d]{1,3}(?:,[\d]{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)/g;
   const str = String(s);
@@ -1249,7 +1358,12 @@ function extractAllMoney(s) {
   while ((m = rx.exec(str))) {
     const amt = normalizeAmount(m[1]);
     const val = Number(amt);
-    if (!isFinite(val) || val <= 0) continue;
+    if (!isFinite(val)) continue;
+
+    const allowZero = !!cfg?.allowZero;
+    if (!allowZero && val <= 0) continue;
+    if (allowZero && val < 0) continue;
+
     if (val >= 1900 && val <= 2099) continue;
     out.push({ amount: amt, value: val });
     if (out.length > 250) break;

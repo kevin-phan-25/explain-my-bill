@@ -644,11 +644,24 @@ async function handleBillProcessing(request, env, corsHeaders) {
       sourceType: extraction.sourceType || sourceType,
       lineKeywords: [
         "total charges", "total billed", "provider charges", "amount billed",
-        "statement total", "billed amount", "total amount", "charges"
+        "statement total", "billed amount", "total amount", "charges",
+        "billed charges", "charges total", "total services", "services total",
+        "total cost", "cost total", "grand total", "subtotal charges",
+        "original charges", "full charges", "provider billed", "facility charges"
       ],
       strongRegexes: [
         /total\s*(charges?|billed|provider\s*charges|amount\s*billed|statement\s*total)\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
         /amount\s*billed\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /billed\s*amount\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /charges\s*total\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /total\s*amount\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /grand\s*total\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /original\s*charges\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /full\s*charges\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /provider\s*billed\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /facility\s*charges\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /total\s*cost\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /subtotal\s*charges\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
       ],
       fallbackPick: "max",
     });
@@ -659,7 +672,10 @@ async function handleBillProcessing(request, env, corsHeaders) {
       lineKeywords: [
         "insurance paid", "plan paid", "insurance payment", "plan payment",
         "adjustments", "contractual adjustment", "allowed amount", "write-off",
-        "your plan paid", "plan payments"
+        "your plan paid", "plan payments", "paid by insurance", "insurance adjustment",
+        "payments from plan", "plan allowance", "contractual allowance", "insurance discount",
+        "discount from insurance", "paid by plan", "insurer paid", "carrier paid",
+        "benefits paid", "covered amount", "reimbursed amount", "reimbursement"
       ],
       strongRegexes: [
         /(insurance|plan)\s*(paid|payment)\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
@@ -667,6 +683,16 @@ async function handleBillProcessing(request, env, corsHeaders) {
         /allowed\s*amount\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
         /adjustments?\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
         /plan\s*paid\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /paid\s*by\s*(insurance|plan)\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /insurance\s*adjustment\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /contractual\s*allowance\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /insurance\s*discount\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /benefits\s*paid\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /covered\s*amount\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /reimbursed\s*amount\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /reimbursement\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /carrier\s*paid\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /insurer\s*paid\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
       ],
       fallbackPick: "best-near-keywords",
     });
@@ -678,12 +704,28 @@ async function handleBillProcessing(request, env, corsHeaders) {
         "patient responsibility", "patient balance", "balance due", "amount due",
         "you owe", "please pay", "pay this amount", "amount you may owe",
         "total due", "amt due", "net due", "patient due",
-        "amount you owe"
+        "amount you owe", "due from patient", "patient amount", "patient pay",
+        "patient co-pay", "coinsurance due", "deductible due", "out-of-pocket",
+        "patient portion", "your responsibility", "member responsibility",
+        "member balance", "patient owed", "owed by patient", "patient liability"
       ],
       strongRegexes: [
         /(patient\s*(responsibility|balance|due|owe))\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
         /(balance\s*due|amount\s*due|total\s*due|net\s*due|amt\s*due|you\s*owe|pay\s*this\s*amount|amount\s*you\s*may\s*owe)\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
         /amount\s*you\s*owe\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /due\s*from\s*patient\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /patient\s*amount\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /patient\s*pay\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /co-pay\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /coinsurance\s*due\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /deductible\s*due\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /out\s*of\s*pocket\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /patient\s*portion\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /your\s*responsibility\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /member\s*responsibility\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /patient\s*owed\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /owed\s*by\s*patient\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
+        /patient\s*liability\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
       ],
       fallbackPick: "due",
     });

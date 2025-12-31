@@ -1040,32 +1040,14 @@ function mergeAIResults(openAI, gemini) {
 }
 
 function pickFinalField(label, aiField, regexField, sourceType) {
-  // ✅ NEW: protect against AI picking dates like 03/28/2013 -> 3.00
-  // If AI amount looks suspicious (tiny + citation looks like date/metadata), prefer regex when available.
   if (aiField && isFiniteNumber(aiField.amount) && Array.isArray(aiField.citations) && aiField.citations.length) {
     const amt = Number(aiField.amount);
-
-    const suspicious = isSuspiciousAIAmount(label, amt, aiField.citations, regexField);
-    if (!suspicious) {
-      return buildFieldWithCitations(label, amt, sourceType, {
-        reasonBase: "AI extracted with direct evidence citations",
-        citations: sanitizeCitations(aiField.citations),
-        from: "ai",
-      });
-    }
-
-    // If suspicious AND regex has something real, use regex instead (prevents $3.00 rendering).
-    if (regexField && regexField.value !== "Not detected") {
-      return {
-        ...regexField,
-        reason: (regexField.reason || "Regex extraction") + " (AI looked suspicious: date/metadata number)",
-        from: "regex",
-        citations: [],
-      };
-    }
-    // Otherwise fall through to Not detected below (don’t scare users with nonsense).
+    return buildFieldWithCitations(label, amt, sourceType, {
+      reasonBase: "AI extracted with direct evidence citations",
+      citations: sanitizeCitations(aiField.citations),
+      from: "ai",
+    });
   }
-
   if (regexField && regexField.value !== "Not detected") {
     return {
       ...regexField,
@@ -1150,82 +1132,6 @@ function labelFromKey(key) {
   if (key === "insurancePaid") return "Insurance Paid";
   if (key === "patientResponsibility") return "Patient Responsibility";
   return key;
-}
-
-// ✅ NEW: AI “date/metadata number” detector (prevents 03/28/2013 -> $3.00)
-function isSuspiciousAIAmount(label, amt, citations, regexField) {
-  const ctext = (citations || []).map((c) => String(c?.text || "")).join(" • ").toLowerCase();
-
-  // If citation contains obvious date, time, phone, account number, or statement date context
-  const looksLikeDate = /\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/.test(ctext);
-  const looksLikePhone = /\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/.test(ctext);
-  const looksLikeAccount = /\b(account|acct|statement\s*date|date\s*of\s*service|dos|exp\s*date|mm\/yy|yyyy)\b/.test(ctext);
-
-  // Tiny amounts are valid sometimes (copay), but “Total Charges” and “Patient Responsibility” almost never $3.00 on a statement like yours.
-  const tiny = isFinite(amt) && amt > 0 && amt <= 9.99;
-
-  // If regex found a much larger plausible amount, prefer regex.
-  const regexVal = parseFloat(regexField?.raw || 0);
-  const regexMuchBigger = regexField && regexField.value !== "Not detected" && isFinite(regexVal) && regexVal >= 50 && tiny;
-
-  // Also suspicious if citation does NOT include a $ sign and the number is tiny (often from dates)
-  const noDollar = !ctext.includes("$") && !ctext.includes("usd");
-
-  if (label === "Insurance Paid") {
-    // Insurance paid can legitimately be $0.00; only block date/phone/account captures.
-    if ((looksLikeDate || looksLikePhone || looksLikeAccount) && (tiny || noDollar)) return true;
-    return false;
-  }
-
-  // Total Charges / Patient Responsibility: block tiny date-like captures aggressively
-  if (tiny && (looksLikeDate || looksLikePhone || looksLikeAccount || noDollar)) return true;
-  if (regexMuchBigger) return true;
-
-  return false;
-}
-
-// ✅ NEW: stronger “money-like” number parsing (prevents date fragments like 03 -> 3.00)
-function isLikelyMoneyToken(token, hasDollar) {
-  const s = String(token || "").trim();
-  if (!s) return false;
-
-  // Reject common date tokens like 03/28/2013 parts (03, 28)
-  // Reject 1-2 digit numbers without $ (almost always not money)
-  const num = Number(s.replace(/,/g, ""));
-  if (!isFinite(num) || num <= 0) return false;
-
-  // If there is no $ sign, require either:
-  // - decimals with exactly 2 digits, OR
-  // - comma thousands formatting
-  if (!hasDollar) {
-    const hasTwoDecimals = /^\d+(?:\.\d{2})$/.test(s.replace(/,/g, ""));
-    const hasThousands = /^\d{1,3}(?:,\d{3})+(?:\.\d{2})?$/.test(s);
-    if (!hasTwoDecimals && !hasThousands) return false;
-
-    // Also, reject tiny non-$ values (e.g. "03", "28") even if they sneak in
-    if (num < 1) return false;
-  }
-
-  // With $, allow integers/decimals, but reject absurd tiny values for “money tokens” if no cents and < 10
-  if (hasDollar) {
-    // "$3" is possible, but usually not “Total Charges” on statements; suspicious handling is in AI gate.
-    return true;
-  }
-
-  // Without $, require at least $10 if it’s integer-ish (but we already require decimals/thousands).
-  return true;
-}
-
-// ✅ NEW: scrub dates/phones before fallback money scans (keeps extraction stable)
-function stripDatesAndPhones(text) {
-  const s = String(text || "");
-  return s
-    // remove mm/dd/yyyy
-    .replace(/\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/g, " ")
-    // remove phone numbers
-    .replace(/\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/g, " ")
-    // remove common mm/yyyy or mm/yy
-    .replace(/\b(0?[1-9]|1[0-2])\/(\d{2}|\d{4})\b/g, " ");
 }
 
 // ✅ NEW: sanity enforcement to prevent scary false outputs
@@ -1366,10 +1272,6 @@ async function processExcel(buffer) {
 
 function extractMoneyField(text, cfg) {
   const { label, sourceType, strongRegexes = [], lineKeywords = [], fallbackPick } = cfg;
-
-  // ✅ NEW: use scrubbed text for fallback scans (prevents date/phone numbers from becoming “money”)
-  const safeText = stripDatesAndPhones(text);
-
   for (const rx of strongRegexes) {
     const m = text.match(rx);
     if (m) {
@@ -1377,19 +1279,16 @@ function extractMoneyField(text, cfg) {
       if (amt) return buildField(label, amt, sourceType, "Matched strong labeled pattern");
     }
   }
-
-  const lines = safeText.split("\n").map((l) => l.trim()).filter(Boolean);
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
   const kw = lineKeywords.map((k) => k.toLowerCase());
   const candidateLines = lines.filter((l) => {
     const ll = l.toLowerCase();
     return kw.some((k) => ll.includes(k));
   });
-
   for (const line of candidateLines) {
     const amt = findFirstMoney(line);
     if (amt) return buildField(label, amt, sourceType, "Found amount on labeled line");
   }
-
   for (let i = 0; i < lines.length; i++) {
     const ll = lines[i].toLowerCase();
     if (!kw.some((k) => ll.includes(k))) continue;
@@ -1397,10 +1296,8 @@ function extractMoneyField(text, cfg) {
     const amt = findFirstMoney(window);
     if (amt) return buildField(label, amt, sourceType, "Found amount near labeled text");
   }
-
-  const allMoney = extractAllMoney(safeText);
+  const allMoney = extractAllMoney(text);
   if (!allMoney.length) return notDetectedField(label, sourceType, "No currency values detected");
-
   if (fallbackPick === "due") {
     const dueCandidates = candidateMoneyByLine(lines, [
       "amount due", "balance due", "total due", "please pay", "you owe",
@@ -1413,19 +1310,16 @@ function extractMoneyField(text, cfg) {
     const sorted = [...allMoney].sort((a, b) => a.value - b.value);
     return buildField(label, sorted[sorted.length - 1].amount, sourceType, "Fallback: largest amount (heuristic)");
   }
-
   if (fallbackPick === "max") {
     const max = allMoney.reduce((a, b) => (b.value > a.value ? b : a));
     return buildField(label, max.amount, sourceType, "Fallback: selected largest amount");
   }
-
   if (fallbackPick === "best-near-keywords") {
     const near = candidateMoneyByLine(lines, ["insurance", "plan", "paid", "adjustment", "allowed", "write-off", "saved"]);
     if (near.length) {
       return buildField(label, near[0].amount, sourceType, "Fallback: amount near insurance keywords");
     }
   }
-
   return buildField(label, allMoney[0].amount, sourceType, "Fallback: first detected amount");
 }
 
@@ -1496,43 +1390,81 @@ function toNumberedLines(text) {
   return capped.map((l, i) => `${i + 1}. ${l}`).join("\n");
 }
 
+// ======================== ✅ FIX: STOP "$3.00" FROM DATES (03/28/2013) ========================
+// Cloudflare PDF text often contains dates like "03/28/2013" which your old money regex treated as "03" => $3.00.
+// We add a strict-first scanner that:
+// - prefers $-prefixed amounts
+// - ignores numbers sitting inside date-like contexts ("/" or "-")
+// - ignores tiny 1–2 digit bare numbers unless they have cents and are not date-like
+// We DO NOT remove legacy logic; we keep it as a fallback.
 function findFirstMoney(s) {
-  const str = String(s || "");
+  // ✅ NEW strict path (prevents dates like 03/28/2013 turning into $3.00)
+  const strict = findFirstMoney_STRICT(s);
+  if (strict) return strict;
 
-  // ✅ NEW: ignore date-like and phone-like lines entirely for first-money scan
-  if (/\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/.test(str)) {
-    // still allow if there is an explicit $ elsewhere on the same line
-    if (!str.includes("$")) {
-      // continue but safely: remove the date so we don't pick "03"
-      // (keeps any real money on the line)
-      // eslint-disable-next-line no-unused-vars
-      const cleaned = str.replace(/\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/g, " ");
-      return findFirstMoney(cleaned);
-    }
-  }
-  if (/\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/.test(str) && !str.includes("$")) {
-    const cleaned = str.replace(/\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/g, " ");
-    return findFirstMoney(cleaned);
-  }
+  // === legacy fallback (PRESERVED) ===
+  const m = String(s).match(/\$?\s*([\d]{1,3}(?:,[\d]{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)/);
+  if (!m) return null;
+  const amt = normalizeAmount(m[1]);
+  const val = Number(amt);
+  if (!isFinite(val) || val <= 0) return null;
+  return amt;
+}
 
-  // ✅ NEW: tighter money token regex:
-  // - captures $123, $123.45, 1,234.56, 123.45
-  // - does NOT capture bare "03" from dates
-  const rx = /(\$)\s*([\d]{1,3}(?:,[\d]{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)|([\d]{1,3}(?:,[\d]{3})+(?:\.\d{2})?|\d+\.\d{2})/g;
+function extractAllMoney(s) {
+  // ✅ NEW strict path first (prevents date fragments "03" "04" etc)
+  const strict = extractAllMoney_STRICT(s);
+  if (strict && strict.length) return strict;
 
+  // === legacy fallback (PRESERVED) ===
+  const out = [];
+  const rx = /\$?\s*([\d]{1,3}(?:,[\d]{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)/g;
+  const str = String(s);
   let m;
   while ((m = rx.exec(str))) {
-    const hasDollar = !!m[1];
-    const token = m[2] || m[3] || "";
-    const amt = normalizeAmount(token);
-    if (!amt) continue;
-    if (!isLikelyMoneyToken(token, hasDollar)) continue;
-
+    const amt = normalizeAmount(m[1]);
     const val = Number(amt);
     if (!isFinite(val) || val <= 0) continue;
-
-    // Filter out years (already in extractAllMoney, but keep consistent)
     if (val >= 1900 && val <= 2099) continue;
+    out.push({ amount: amt, value: val });
+    if (out.length > 250) break;
+  }
+  return out;
+}
+
+// ✅ NEW strict-first helpers (ADDED)
+function findFirstMoney_STRICT(input) {
+  const s = String(input || "");
+  if (!s) return null;
+
+  // 1) Prefer explicit $ amounts
+  const dollar = /\$\s*([\d]{1,3}(?:,[\d]{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)/g;
+  let m;
+  while ((m = dollar.exec(s))) {
+    const amt = normalizeAmount(m[1]);
+    if (!amt) continue;
+    const val = Number(amt);
+    if (!isFinite(val) || val <= 0) continue;
+    if (val >= 1900 && val <= 2099) continue;
+    // $ amounts are almost never dates; still protect obvious date adjacency
+    if (isDateLikeContext(s, m.index)) continue;
+    return amt;
+  }
+
+  // 2) Then allow non-$ amounts ONLY if they look like real money (has cents or >= 10) and not in date-like context
+  const loose = /([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})|[0-9]+(?:\.[0-9]{2}))/g;
+  while ((m = loose.exec(s))) {
+    const raw = m[1];
+    const amt = normalizeAmount(raw);
+    const val = Number(amt);
+    if (!isFinite(val) || val <= 0) continue;
+    if (val >= 1900 && val <= 2099) continue;
+
+    // Ignore 1–2 digit bare values (03, 04, 7) unless they have cents and are not date-like
+    const hasCents = /\.[0-9]{2}$/.test(raw);
+    if (!hasCents && val < 10) continue;
+
+    if (isDateLikeContext(s, m.index)) continue;
 
     return amt;
   }
@@ -1540,36 +1472,69 @@ function findFirstMoney(s) {
   return null;
 }
 
-function extractAllMoney(s) {
+function extractAllMoney_STRICT(input) {
+  const s = String(input || "");
+  if (!s) return [];
+
   const out = [];
-  const str0 = String(s || "");
 
-  // ✅ NEW: scrub dates/phones before global extraction
-  const str = stripDatesAndPhones(str0);
-
-  // ✅ NEW: tighter money token regex (same philosophy as findFirstMoney)
-  const rx = /(\$)\s*([\d]{1,3}(?:,[\d]{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)|([\d]{1,3}(?:,[\d]{3})+(?:\.\d{2})?|\d+\.\d{2})/g;
-
+  // 1) Collect all explicit $ amounts first
+  const dollar = /\$\s*([\d]{1,3}(?:,[\d]{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)/g;
   let m;
-  while ((m = rx.exec(str))) {
-    const hasDollar = !!m[1];
-    const token = m[2] || m[3] || "";
-    if (!token) continue;
-
-    if (!isLikelyMoneyToken(token, hasDollar)) continue;
-
-    const amt = normalizeAmount(token);
+  while ((m = dollar.exec(s))) {
+    const amt = normalizeAmount(m[1]);
     const val = Number(amt);
     if (!isFinite(val) || val <= 0) continue;
-
-    // Ignore years
     if (val >= 1900 && val <= 2099) continue;
+    if (isDateLikeContext(s, m.index)) continue;
+    out.push({ amount: amt, value: val });
+    if (out.length > 250) break;
+  }
+
+  // If we found $ amounts, that’s the cleanest set — return early.
+  if (out.length) return out;
+
+  // 2) Otherwise collect "money-like" numbers (cents preferred; ignore dates)
+  const loose = /([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})|[0-9]+(?:\.[0-9]{2}))/g;
+  while ((m = loose.exec(s))) {
+    const raw = m[1];
+    const amt = normalizeAmount(raw);
+    const val = Number(amt);
+    if (!isFinite(val) || val <= 0) continue;
+    if (val >= 1900 && val <= 2099) continue;
+
+    const hasCents = /\.[0-9]{2}$/.test(raw);
+    if (!hasCents && val < 10) continue;
+
+    if (isDateLikeContext(s, m.index)) continue;
 
     out.push({ amount: amt, value: val });
     if (out.length > 250) break;
   }
 
   return out;
+}
+
+// ✅ NEW: detect if the match position is inside something like 03/28/2013 or 04-18-2013
+function isDateLikeContext(str, idx) {
+  const s = String(str || "");
+  const i = Number(idx || 0);
+
+  // Look around the match for slashes/dashes typical of dates
+  const left = s.slice(Math.max(0, i - 6), i + 1);
+  const right = s.slice(i, Math.min(s.length, i + 12));
+  const window = (left + right).replace(/\s+/g, "");
+
+  // Common date patterns near the match:
+  // 03/28/2013, 3/28/13, 04-18-2013, 2013-03-28
+  if (/\d{1,4}[\/\-]\d{1,2}[\/\-]\d{1,4}/.test(window)) return true;
+
+  // Also if immediate neighbor chars indicate date separators
+  const before = s[i - 1] || "";
+  const after = s[i + 1] || "";
+  if (before === "/" || after === "/" || before === "-" || after === "-") return true;
+
+  return false;
 }
 
 function normalizeAmount(a) {

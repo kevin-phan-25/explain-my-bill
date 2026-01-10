@@ -1,17 +1,14 @@
 name = "explain-my-bill"
 main = "worker/src/index.js"
-compatibility_date = "2025-12-29"  # Update to today or later
+compatibility_date = "2025-12-29"
 compatibility_flags = ["nodejs_compat"]
 
-# Add this section for better performance with large modules
 [vars]
 # No vars needed right now
 
-# Important for Tesseract.js (wasm files)
 [build]
 command = ""  # No build step needed
 
-# Enable these for better debugging (optional but recommended)
 [observability]
 enabled = true
 

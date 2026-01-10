@@ -1,11 +1,3 @@
-
----
-
-# ✅ Worker code (all files)
-
-## `worker/src/index.js`
-
-```js
 // ExplainMyBill Worker — PRODUCTION-OPTIMIZED FINAL MERGED (December 30, 2025)
 // ✅ Full Stripe checkout (subscription + one-time + lifetime)
 // ✅ All power tools live

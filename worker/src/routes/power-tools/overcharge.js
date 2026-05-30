@@ -1,104 +1,100 @@
 import { jsonResponse, errorResponse } from "../../utils/response.js";
 import { processSingleBill } from "../../bill/processor.js";
 
-// ======================== MASSIVELY EXPANDED & ACCURATE 2025 OVERCHARGE BENCHMARKS ========================
+/**
+ * Overcharge Detection Power Tool
+ * Updated: May 30, 2026
+ */
+
+// Updated 2026 national average benchmarks (approximate, based on FAIR Health, CMS, and industry data)
+const benchmarks = {
+  emergencyRoomVisit: 3200,
+  urgentCareVisit: 380,
+  primaryCareVisit: 190,
+  mriBrain: 2600,
+  ctHead: 1800,
+  ultrasoundAbdominal: 850,
+  xrayChest: 420,
+  mammography: 380,
+  colonoscopy: 4000,
+  cataractSurgery: 5200,
+  appendectomy: 34000,
+  kneeReplacement: 48000,
+  hipReplacement: 51000,
+  gallbladderRemoval: 29000,
+  normalDelivery: 19500,
+  cSection: 27000,
+  hospitalDayGeneral: 4500,
+  icuDay: 13500,
+  physicalTherapySession: 160,
+};
+
 function detectOvercharges(billResult) {
-  const total = parseFloat(billResult.structured.keyAmounts.totalCharges.raw || 0);
+  const totalRaw = billResult.structured.keyAmounts.totalCharges.raw || "0";
+  const total = parseFloat(totalRaw);
   const flags = [];
+  const suggestions = [];
 
-  const benchmarks = {
-    // Emergency & Urgent
-    emergencyRoomVisit: 3000,
-    urgentCareVisit: 350,
-    primaryCareVisit: 180,
+  if (!total || total <= 0) {
+    return { totalCharged: "Not detected", flags: ["Unable to read total charges"], note: "Analysis unavailable" };
+  }
 
-    // Imaging
-    mriBrain: 2500,
-    ctHead: 1700,
-    ultrasoundAbdominal: 800,
-    xrayChest: 400,
-    mammography: 350,
+  // High-impact flags with better logic
+  if (total > benchmarks.emergencyRoomVisit * 1.8) {
+    flags.push(`Emergency Room visit significantly above national average (≈ $${benchmarks.emergencyRoomVisit})`);
+    suggestions.push("Request itemized breakdown and compare line items to Medicare rates.");
+  }
+  if (total > benchmarks.mriBrain * 1.9) {
+    flags.push(`MRI appears high (national avg ≈ $${benchmarks.mriBrain})`);
+  }
+  if (total > benchmarks.hospitalDayGeneral * 4) {
+    flags.push(`Hospital stay charges appear elevated (daily avg ≈ $${benchmarks.hospitalDayGeneral})`);
+  }
+  if (total > benchmarks.appendectomy * 1.4) {
+    flags.push(`Appendectomy charges high vs national average`);
+  }
+  if (total > benchmarks.kneeReplacement * 1.35) {
+    flags.push(`Knee replacement significantly above typical range`);
+  }
+  if (total > benchmarks.cSection * 1.25) {
+    flags.push(`C-section charges above typical range`);
+  }
 
-    // Surgery & Procedures
-    colonoscopy: 3800,
-    cataractSurgery: 4800,
-    appendectomy: 32000,
-    kneeReplacement: 45000,
-    hipReplacement: 48000,
-    gallbladderRemoval: 28000,
-    tonsillectomy: 8500,
-    wisdomTeethRemoval: 4200,
-    cardiacStent: 38000,
-
-    // Maternity
-    normalDelivery: 18000,
-    cSection: 25000,
-
-    // Hospital Stays
-    hospitalDayGeneral: 4200,
-    icuDay: 12000,
-
-    // Therapy & Office
-    physicalTherapySession: 150,
-    psychotherapySession: 180,
-    chiropracticAdjustment: 80,
-
-    // Lab & Diagnostics
-    labBloodWork: 300,
-    covidTest: 150,
-
-    // Dental
-    dentalCleaning: 150,
-    rootCanal: 1200,
-    crownDental: 1400,
-
-    // Vision
-    eyeExam: 180,
-    lasikPerEye: 2500,
-  };
-
-  // High-impact flags
-  if (total > benchmarks.emergencyRoomVisit * 2) flags.push(`ER visit >2× national average (~$3,000)`);
-  if (total > benchmarks.urgentCareVisit * 5) flags.push(`Urgent care appears high (avg ~$350)`);
-  if (total > benchmarks.mriBrain * 2) flags.push(`MRI >2× average (~$2,500)`);
-  if (total > benchmarks.ctHead * 2) flags.push(`CT scan >2× average (~$1,700)`);
-  if (total > benchmarks.hospitalDayGeneral * 5) flags.push(`Hospital stay >5× daily rate (~$4,200/day)`);
-  if (total > benchmarks.normalDelivery * 1.5) flags.push(`Delivery charges high (avg ~$18,000)`);
-  if (total > benchmarks.cSection * 1.3) flags.push(`C-section elevated (avg ~$25,000)`);
-  if (total > benchmarks.appendectomy * 1.5) flags.push(`Appendectomy high (avg ~$32,000)`);
-  if (total > benchmarks.kneeReplacement * 1.4) flags.push(`Knee replacement high (avg ~$45,000)`);
-  if (total > benchmarks.cardiacStent * 1.5) flags.push(`Cardiac stent high (avg ~$38,000)`);
+  const severity = flags.length > 2 ? "High" : flags.length > 0 ? "Medium" : "Low";
 
   return {
     totalCharged: billResult.structured.keyAmounts.totalCharges.value,
-    flags: flags.length > 0 ? flags : ["No major overcharges detected vs national averages"],
-    note: "Based on FAIR Health, Medicare, and CMS data (2025 estimates). Not a guarantee.",
+    severity,
+    flags: flags.length > 0 ? flags : ["No major red flags detected compared to 2026 national averages"],
+    suggestions: suggestions.length > 0 ? suggestions : ["Review line-by-line charges if you have the full itemized bill"],
+    note: "Benchmarks are approximate (FAIR Health / CMS 2026 estimates). Always verify with your insurer.",
   };
 }
 
-// ======================== OVERCHARGE DETECTION ========================
 export async function handleOverchargeDetection(request, env, corsHeaders) {
   try {
     const form = await request.formData();
     const billFile = form.get("bill");
 
-    if (!billFile) return errorResponse("Upload provider bill", 400, corsHeaders);
+    if (!billFile) {
+      return errorResponse("Please upload a provider bill", 400, corsHeaders);
+    }
 
     const result = await processSingleBill(billFile, env);
+    const analysis = detectOvercharges(result);
 
-    const flags = detectOvercharges(result);
-
-    return jsonResponse(
-      {
-        flags,
-        bill: result,
-        privacyNote: "Document processed in memory only. Nothing stored.",
+    return jsonResponse({
+      success: true,
+      analysis,
+      billSummary: {
+        totalCharges: result.structured.keyAmounts.totalCharges.value,
+        patientResponsibility: result.structured.keyAmounts.patientResponsibility.value,
       },
-      corsHeaders
-    );
+      privacyNote: "Document processed in memory only. Nothing is stored.",
+    }, corsHeaders);
+
   } catch (err) {
     console.error("Overcharge detection error:", err);
-    return errorResponse("Detection failed", 500, corsHeaders);
+    return errorResponse("Overcharge analysis failed. Please try again.", 500, corsHeaders);
   }
 }
-

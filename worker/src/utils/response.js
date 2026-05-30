@@ -1,13 +1,27 @@
-export function jsonResponse(obj, corsHeaders) {
+/**
+ * HTTP Response Utilities
+ * Updated: May 30, 2026
+ */
+
+export function jsonResponse(obj, corsHeaders = {}) {
   return new Response(JSON.stringify(obj), {
-    headers: { "Content-Type": "application/json", ...corsHeaders },
+    status: 200,
+    headers: { 
+      "Content-Type": "application/json",
+      ...corsHeaders 
+    },
   });
 }
 
-export function errorResponse(msg, status, corsHeaders) {
-  return new Response(JSON.stringify({ error: msg }), {
+export function errorResponse(msg, status = 400, corsHeaders = {}) {
+  return new Response(JSON.stringify({ 
+    error: msg,
+    success: false 
+  }), {
     status,
-    headers: { "Content-Type": "application/json", ...corsHeaders },
+    headers: { 
+      "Content-Type": "application/json",
+      ...corsHeaders 
+    },
   });
 }
-

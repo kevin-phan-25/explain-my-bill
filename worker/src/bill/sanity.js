@@ -1,5 +1,11 @@
-// ✅ NEW: sanity enforcement to prevent scary false outputs
+import { isFiniteNumber } from "../utils/core.js";
 
+/**
+ * Sanity & Boost utilities for bill processing
+ * Updated: May 30, 2026
+ */
+
+// Internal helper
 function labelFromKey(key) {
   if (key === "totalCharges") return "Total Charges";
   if (key === "insurancePaid") return "Insurance Paid";
@@ -7,16 +13,19 @@ function labelFromKey(key) {
   return key;
 }
 
+/**
+ * Enforce logical sanity rules on extracted amounts to prevent scary/wrong outputs
+ */
 export function enforceAmountSanity(text, sourceType, totalCharges, insurancePaid, patientResponsibility) {
   const t = parseFloat(totalCharges?.raw || 0);
   const i = parseFloat(insurancePaid?.raw || 0);
   const p = parseFloat(patientResponsibility?.raw || 0);
 
   // If total is missing, nothing to sanity-check.
-  if (!isFinite(t) || t <= 0) return;
+  if (!isFiniteNumber(t) || t <= 0) return;
 
   // Patient responsibility can never be > total charges (for a single claim/summary).
-  if (patientResponsibility?.value !== "Not detected" && isFinite(p) && p > t + 1) {
+  if (patientResponsibility?.value !== "Not detected" && isFiniteNumber(p) && p > t + 1) {
     patientResponsibility.label = "Patient Responsibility";
     patientResponsibility.value = "Not detected";
     patientResponsibility.raw = "";
@@ -29,7 +38,7 @@ export function enforceAmountSanity(text, sourceType, totalCharges, insurancePai
   }
 
   // Insurance paid should not massively exceed total charges.
-  if (insurancePaid?.value !== "Not detected" && isFinite(i) && i > t * 1.25) {
+  if (insurancePaid?.value !== "Not detected" && isFiniteNumber(i) && i > t * 1.25) {
     insurancePaid.value = "Not detected";
     insurancePaid.raw = "";
     insurancePaid.confidence = 0;
@@ -43,13 +52,15 @@ export function enforceAmountSanity(text, sourceType, totalCharges, insurancePai
   // If both insurancePaid and patientResponsibility exist but sum is wildly off, downgrade the weaker one.
   const ii = parseFloat(insurancePaid?.raw || 0);
   const pp = parseFloat(patientResponsibility?.raw || 0);
+
   if (insurancePaid?.value !== "Not detected" && patientResponsibility?.value !== "Not detected") {
-    if (isFinite(ii) && isFinite(pp) && (ii + pp) > t * 1.6) {
+    if (isFiniteNumber(ii) && isFiniteNumber(pp) && (ii + pp) > t * 1.6) {
       // Prefer keeping patient responsibility if it came from strong "you owe" phrasing
       const low =
         (insurancePaid.confidence || 0) <= (patientResponsibility.confidence || 0)
           ? insurancePaid
           : patientResponsibility;
+
       low.value = "Not detected";
       low.raw = "";
       low.confidence = 0;
@@ -61,22 +72,30 @@ export function enforceAmountSanity(text, sourceType, totalCharges, insurancePai
   }
 }
 
+/**
+ * Boost confidence when both OpenAI and Gemini agree on the same amount
+ */
 export function applyCrossAIAmountBoost(openAI, gemini, fields) {
   const o = openAI?.fields || {};
   const g = gemini?.fields || {};
+
   const pairs = [
     ["totalCharges", o.totalCharges, g.totalCharges],
     ["insurancePaid", o.insurancePaid, g.insurancePaid],
     ["patientResponsibility", o.patientResponsibility, g.patientResponsibility],
   ];
+
   for (const [key, a, b] of pairs) {
     if (!a || !b) continue;
+
     const aa = Number(a.amount);
     const bb = Number(b.amount);
-    if (!Number.isFinite(aa) || !Number.isFinite(bb)) continue;
+
+    if (!isFiniteNumber(aa) || !isFiniteNumber(bb)) continue;
 
     const diff = Math.abs(aa - bb);
     const base = Math.max(aa, bb, 1);
+
     if (diff <= 2 || diff / base <= 0.01) {
       const target = fields.find((f) => f.label === labelFromKey(key));
       if (target && target.value !== "Not detected") {
@@ -88,10 +107,15 @@ export function applyCrossAIAmountBoost(openAI, gemini, fields) {
   }
 }
 
+/**
+ * Boost confidence if the extracted amount appears verbatim in the original text
+ */
 export function applyInTextBoost(text, fields) {
   const t = String(text || "").replace(/,/g, "");
+
   for (const f of fields) {
     if (!f || !f.raw || f.value === "Not detected") continue;
+
     const raw = String(f.raw).replace(/,/g, "");
     if (raw && t.includes(raw)) {
       f.confidence = Math.min(1, Number((f.confidence + 0.04).toFixed(2)));
@@ -99,4 +123,3 @@ export function applyInTextBoost(text, fields) {
     }
   }
 }
-

@@ -7,7 +7,7 @@ compatibility_flags = ["nodejs_compat"]
 # No vars needed right now
 
 [build]
-command = ""  # No build step needed
+command = "npm install"
 
 [observability]
 enabled = true

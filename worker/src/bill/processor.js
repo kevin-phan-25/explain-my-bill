@@ -28,12 +28,12 @@ export async function processSingleBill(file, env) {
       rawText = ocr.text || rawText;
     }
     sourceType = rawText.length > 200 ? "pdf" : "pdf+ocr";
-  } 
+  }
   else if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
     const pages = await processExcel(buffer);
     rawText = pages.map((p) => p.rawText).join("\n\n");
     sourceType = "excel";
-  } 
+  }
   else {
     // Images
     const gv = await extractWithGoogleVision(buffer, file.type, env);
@@ -134,6 +134,13 @@ export async function processSingleBill(file, env) {
   // ✅ CRITICAL SAFETY: prevent scary nonsense
   enforceAmountSanity(text, sourceType, totalCharges, insurancePaid, patientResponsibility);
 
+  // ✅ FIX: Detect when insurancePaid and patientResponsibility resolved to the same value.
+  // This happens when a bill has a single "Balance Due" or "Amount Due" line and both
+  // fallback pickers latch onto it. In that case, derive patient responsibility from
+  // total - insurance if we have enough data; otherwise mark it as not detected so we
+  // don't show a clearly wrong duplicate to the user.
+  _fixDuplicateAmounts(totalCharges, insurancePaid, patientResponsibility, sourceType);
+
   applyCrossAIAmountBoost(openAI, gemini, [totalCharges, insurancePaid, patientResponsibility]);
   applyInTextBoost(text, [totalCharges, insurancePaid, patientResponsibility]);
 
@@ -146,6 +153,83 @@ export async function processSingleBill(file, env) {
     },
     sourceType,
   };
+}
+
+// ======================== DUPLICATE AMOUNT GUARD ========================
+
+/**
+ * Fix the case where insurancePaid and patientResponsibility resolved to the same
+ * dollar value. This almost always means one of them is wrong — typically the
+ * patientResponsibility fallback grabbed the same "Balance Due" line that
+ * insurancePaid already claimed, or vice versa.
+ *
+ * Resolution strategy (in priority order):
+ *  1. If total is known and insurance is known, derive patient = total - insurance.
+ *  2. If total is known but insurance is unknown, derive insurance = total - patient.
+ *  3. If we can't derive anything safely, null out patientResponsibility so we
+ *     never show an obviously wrong duplicate to the user.
+ */
+function _fixDuplicateAmounts(totalCharges, insurancePaid, patientResponsibility, sourceType) {
+  const t = parseFloat(totalCharges?.raw || 0);
+  const i = parseFloat(insurancePaid?.raw || 0);
+  const p = parseFloat(patientResponsibility?.raw || 0);
+
+  const tOk = isFiniteNumber(t) && t > 0 && totalCharges?.value !== "Not detected";
+  const iOk = isFiniteNumber(i) && i > 0 && insurancePaid?.value !== "Not detected";
+  const pOk = isFiniteNumber(p) && p > 0 && patientResponsibility?.value !== "Not detected";
+
+  // Nothing to fix if they aren't both detected or aren't the same.
+  if (!iOk || !pOk) return;
+  if (Math.abs(i - p) > 0.02) return; // not a duplicate — different values
+
+  // They matched. Figure out which one to trust more.
+  const iConf = insurancePaid.confidence || 0;
+  const pConf = patientResponsibility.confidence || 0;
+
+  // Strategy 1: derive the lower-confidence field from total - other
+  if (tOk) {
+    if (iConf >= pConf) {
+      // Trust insurance, derive patient
+      const derived = Math.max(0, t - i);
+      patientResponsibility.value = formatUSD(String(derived.toFixed(2)));
+      patientResponsibility.raw = derived.toFixed(2);
+      patientResponsibility.confidence = clamp(
+        Number(((iConf + pConf) / 2 - 0.10).toFixed(2)),
+        0.15,
+        0.80
+      );
+      patientResponsibility.reason =
+        "Derived: total charges minus insurance paid (duplicate field value detected — original values were identical)";
+      patientResponsibility.source = sourceType || "unknown";
+      patientResponsibility.from = "derived";
+    } else {
+      // Trust patient responsibility, derive insurance
+      const derived = Math.max(0, t - p);
+      insurancePaid.value = formatUSD(String(derived.toFixed(2)));
+      insurancePaid.raw = derived.toFixed(2);
+      insurancePaid.confidence = clamp(
+        Number(((iConf + pConf) / 2 - 0.10).toFixed(2)),
+        0.15,
+        0.80
+      );
+      insurancePaid.reason =
+        "Derived: total charges minus patient responsibility (duplicate field value detected — original values were identical)";
+      insurancePaid.source = sourceType || "unknown";
+      insurancePaid.from = "derived";
+    }
+    return;
+  }
+
+  // Strategy 2: total unknown — we can't derive anything safely.
+  // Null out patientResponsibility (it's the field users care most about getting right).
+  patientResponsibility.value = "Not detected";
+  patientResponsibility.raw = "";
+  patientResponsibility.confidence = 0;
+  patientResponsibility.reason =
+    "Could not determine: extracted value matched insurance paid exactly — likely the same line was matched twice. Check your EOB for the actual amount you owe.";
+  patientResponsibility.source = sourceType || "unknown";
+  patientResponsibility.from = "none";
+  patientResponsibility.citations = [];
 }
 
 // ======================== ALL ORIGINAL FUNCTIONS BELOW (UNCHANGED & PRESERVED) ========================
@@ -162,11 +246,11 @@ export function getCalmExplanation(total, ins, patient) {
   const p = patient.value !== "Not detected" ? patient.value : "unknown at this time";
 
   return (
-    "Here’s what this document is telling you in simple terms:\n\n" +
+    "Here's what this document is telling you in simple terms:\n\n" +
     `• The provider charged ${t} for the services.\n` +
     `• Your insurance has covered ${i} so far (this includes payments and discounts).\n` +
     `• The remaining amount you may be responsible for is ${p}.\n\n` +
-    "Important: If this is just the hospital’s itemized bill (not an EOB), your actual responsibility is usually much lower after insurance. " +
-    "Always check your official Explanation of Benefits from your insurer — that’s the final word on what you owe."
+    "Important: If this is just the hospital's itemized bill (not an EOB), your actual responsibility is usually much lower after insurance. " +
+    "Always check your official Explanation of Benefits from your insurer — that's the final word on what you owe."
   );
 }

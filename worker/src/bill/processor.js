@@ -1,3 +1,5 @@
+import { clamp, normalizeAmount, formatUSD, pickAmountGroup, isFiniteNumber } from "../utils/core.js";
+
 import { extractTextFromPDF } from "../extractors/pdf.js";
 import { extractWithOcrSpace } from "../extractors/ocr-space.js";
 import { extractWithGoogleVision } from "../extractors/google-vision.js";
@@ -6,12 +8,12 @@ import { processExcel } from "../extractors/excel.js";
 import { normalizeBillText, toNumberedLines } from "./text.js";
 import { extractMoneyField } from "./money-extract.js";
 import { enforceAmountSanity, applyCrossAIAmountBoost, applyInTextBoost } from "./sanity.js";
-
 import { analyzeWithOpenAI_AIExtract } from "../ai/openai.js";
 import { analyzeWithGemini_AIExtract } from "../ai/gemini.js";
 import { mergeAIResults, pickFinalField } from "../ai/merge.js";
 
 // ======================== SHARED BILL PROCESSING ========================
+
 export async function processSingleBill(file, env) {
   const buffer = new Uint8Array(await file.arrayBuffer());
   const name = (file.name || "").toLowerCase();
@@ -26,11 +28,14 @@ export async function processSingleBill(file, env) {
       rawText = ocr.text || rawText;
     }
     sourceType = rawText.length > 200 ? "pdf" : "pdf+ocr";
-  } else if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
+  } 
+  else if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
     const pages = await processExcel(buffer);
     rawText = pages.map((p) => p.rawText).join("\n\n");
     sourceType = "excel";
-  } else {
+  } 
+  else {
+    // Images
     const gv = await extractWithGoogleVision(buffer, file.type, env);
     rawText = gv.text || "";
     if (!rawText || rawText.trim().length < 200) {
@@ -43,6 +48,7 @@ export async function processSingleBill(file, env) {
   const text = normalizeBillText(rawText);
   const lines = toNumberedLines(text);
 
+  // Run both AIs in parallel
   const [openAI, gemini] = await Promise.all([
     analyzeWithOpenAI_AIExtract(lines, true, env),
     analyzeWithGemini_AIExtract(lines, true, env),
@@ -50,6 +56,7 @@ export async function processSingleBill(file, env) {
 
   const aiMerged = mergeAIResults(openAI, gemini);
 
+  // === Regex-based extraction (strong fallback) ===
   const regexTotalCharges = extractMoneyField(text, {
     label: "Total Charges",
     sourceType,
@@ -85,7 +92,6 @@ export async function processSingleBill(file, env) {
     fallbackPick: "best-near-keywords",
   });
 
-  // EOB-aware: look for "Amount you owe", "You owe or already paid", etc.
   const regexPatientDue = extractMoneyField(text, {
     label: "Patient Responsibility",
     sourceType,
@@ -110,12 +116,14 @@ export async function processSingleBill(file, env) {
     regexTotalCharges,
     sourceType
   );
+
   const insurancePaid = pickFinalField(
     "Insurance Paid",
     aiMerged?.fields?.insurancePaid,
     regexInsurancePaid,
     sourceType
   );
+
   const patientResponsibility = pickFinalField(
     "Patient Responsibility",
     aiMerged?.fields?.patientResponsibility,
@@ -141,6 +149,7 @@ export async function processSingleBill(file, env) {
 }
 
 // ======================== ALL ORIGINAL FUNCTIONS BELOW (UNCHANGED & PRESERVED) ========================
+
 export function getSmartSummary(total, ins, patient) {
   if (patient.value === "Not detected") return "We found the billed amount, but not what you owe.";
   if (ins.value === "Not detected") return "This appears to be a provider bill — insurance info may be on a separate EOB.";
@@ -161,4 +170,3 @@ export function getCalmExplanation(total, ins, patient) {
     "Always check your official Explanation of Benefits from your insurer — that’s the final word on what you owe."
   );
 }
-

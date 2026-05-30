@@ -1,7 +1,11 @@
 import { jsonResponse, errorResponse } from "../../utils/response.js";
 import { processSingleBill } from "../../bill/processor.js";
 
-// ======================== EOB COMPARISON (FIXED: NO DUPLICATE "eob") ========================
+/**
+ * EOB vs Provider Bill Comparison Tool
+ * Updated: May 30, 2026
+ */
+
 export async function handleEOBComparison(request, env, corsHeaders) {
   try {
     const form = await request.formData();
@@ -9,7 +13,7 @@ export async function handleEOBComparison(request, env, corsHeaders) {
     const eobFile = form.get("eob");
 
     if (!providerBillFile || !eobFile) {
-      return errorResponse("Please upload both provider bill and EOB", 400, corsHeaders);
+      return errorResponse("Please upload both Provider Bill and EOB", 400, corsHeaders);
     }
 
     const [providerResult, eobResult] = await Promise.all([
@@ -19,18 +23,17 @@ export async function handleEOBComparison(request, env, corsHeaders) {
 
     const comparison = compareBills(providerResult, eobResult);
 
-    return jsonResponse(
-      {
-        comparison,
-        providerBill: providerResult,
-        eob: eobResult,
-        privacyNote: "Both documents processed in memory only. Nothing stored.",
-      },
-      corsHeaders
-    );
+    return jsonResponse({
+      success: true,
+      comparison,
+      providerBill: providerResult,
+      eob: eobResult,
+      privacyNote: "Both documents processed in memory only. Nothing stored.",
+    }, corsHeaders);
+
   } catch (err) {
     console.error("EOB comparison error:", err);
-    return errorResponse("Comparison failed", 500, corsHeaders);
+    return errorResponse("Comparison failed. Please try again.", 500, corsHeaders);
   }
 }
 
@@ -47,23 +50,23 @@ function compareBills(provider, eob) {
   let mainMessage = "";
   let severity = "info";
 
-  if (Math.abs(pTotal - eTotal) > 5) {
-    discrepancies.push(`Total charges differ: Provider says ${p.totalCharges.value}, EOB says ${e.totalCharges.value}`);
+  if (Math.abs(pTotal - eTotal) > 10) {
+    discrepancies.push(`Total Charges differ significantly: Provider = ${p.totalCharges.value}, EOB = ${e.totalCharges.value}`);
   }
 
   if (e.patientResponsibility.value !== "Not detected") {
-    if (pPatient === 0 || pPatient > ePatient + 5) {
-      mainMessage = `GOOD NEWS: Your insurance says you only owe ${e.patientResponsibility.value} — not the full billed amount!`;
+    if (pPatient === 0 || pPatient > ePatient + 10) {
+      mainMessage = `✅ GOOD NEWS: Your insurance says you only owe ${e.patientResponsibility.value} — much lower than the provider bill!`;
       severity = "success";
-    } else if (pPatient > 0 && Math.abs(pPatient - ePatient) > 5) {
-      mainMessage = `ALERT: The provider and EOB disagree on what you owe (${p.patientResponsibility.value} vs ${e.patientResponsibility.value}).`;
+    } else if (pPatient > 0 && Math.abs(pPatient - ePatient) > 10) {
+      mainMessage = `⚠️ ALERT: Provider and EOB disagree on what you owe (${p.patientResponsibility.value} vs ${e.patientResponsibility.value}).`;
       severity = "warning";
     } else {
-      mainMessage = `Your responsibility is ${e.patientResponsibility.value} according to your insurance.`;
+      mainMessage = `✅ Your final responsibility according to insurance is ${e.patientResponsibility.value}.`;
       severity = "success";
     }
   } else {
-    mainMessage = "We found your EOB but couldn't locate the final patient responsibility. Look for 'Amount You Owe' or 'Patient Balance'.";
+    mainMessage = "We could not clearly detect patient responsibility on the EOB. Look for 'Amount You Owe' or 'Patient Balance'.";
     severity = "warning";
   }
 
@@ -77,4 +80,3 @@ function compareBills(provider, eob) {
     eobAmounts: e,
   };
 }
-

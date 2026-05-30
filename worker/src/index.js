@@ -3,11 +3,10 @@
  * Production-Optimized • Privacy-First • May 30, 2026
  *
  * Features:
- * - Single bill analysis
- * - Power tools (EOB comparison, Appeal letter, Overcharge detection, Prior Auth)
- * - Stripe checkout (one-time + subscriptions)
- * - No data retention policy
- * - Not HIPAA-certified — educational tool only
+ * - AI-Powered Bill Analysis (Medical + Utility)
+ * - Power Tools (EOB Comparison, Appeal Letter, Overcharge Detection, Prior Auth)
+ * - Stripe Checkout (Subscriptions + One-time + Lifetime)
+ * - Zero data retention • Educational tool only • Not HIPAA-certified
  */
 
 import { buildCorsHeaders } from "./middleware/cors.js";
@@ -27,7 +26,7 @@ export default {
     const url = new URL(request.url);
     const corsHeaders = buildCorsHeaders(request);
 
-    // Handle CORS preflight
+    // Handle CORS preflight requests
     if (request.method === "OPTIONS") {
       return new Response(null, { headers: corsHeaders });
     }
@@ -60,27 +59,35 @@ export default {
         return await handlePriorAuth(request, env, corsHeaders);
       }
 
-      // ======================== MAIN BILL PROCESSING ========================
+      // ======================== MAIN BILL ANALYSIS ========================
       if (request.method === "POST") {
         return await handleBillProcessing(request, env, corsHeaders);
       }
 
-      // ======================== DEFAULT / HEALTH CHECK ========================
+      // ======================== ROOT / HEALTH CHECK ========================
       return new Response(
-        "ExplainMyBill API v2026 • Running Successfully\n" +
+        "ExplainMyBill API v2026 ✅\n\n" +
+        "• AI-Powered Medical & Utility Bill Analyzer\n" +
         "• Privacy-first: No bills are stored or logged\n" +
-        "• Educational tool only • Not HIPAA-certified",
+        "• Educational tool only • Not HIPAA-certified\n\n" +
+        "Endpoints:\n" +
+        "→ POST /          → Analyze a bill\n" +
+        "→ POST /detect-overcharge   → Overcharge detection\n" +
+        "→ POST /compare-eob         → EOB vs Provider Bill\n" +
+        "→ POST /generate-appeal     → Generate appeal letter\n" +
+        "→ POST /create-checkout-session → Stripe checkout\n\n" +
+        "Live at: https://explain-my-bill.explainmybill.workers.dev/",
         {
-          headers: { 
+          headers: {
             "Content-Type": "text/plain",
-            ...corsHeaders 
+            ...corsHeaders,
           },
         }
       );
 
     } catch (err) {
       console.error("Worker top-level error:", err?.message || err);
-      return errorResponse("Internal server error. Please try again.", 500, corsHeaders);
+      return errorResponse("Internal server error. Please try again later.", 500, corsHeaders);
     }
   },
 };

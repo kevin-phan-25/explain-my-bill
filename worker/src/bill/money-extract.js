@@ -1,4 +1,4 @@
-import { clamp, normalizeAmount, formatUSD, pickAmountGroup } from "../utils/core.js";
+import { clamp, normalizeAmount, formatUSD, pickAmountGroup, isFiniteNumber } from "../utils/core.js";
 
 // ======================== ✅ FIX: STOP "$3.00" FROM DATES (03/28/2013) ========================
 // Cloudflare PDF text often contains dates like "03/28/2013" which your old money regex treated as "03" => $3.00.
@@ -7,6 +7,7 @@ import { clamp, normalizeAmount, formatUSD, pickAmountGroup } from "../utils/cor
 // - ignores numbers sitting inside date-like contexts ("/" or "-")
 // - ignores tiny 1–2 digit bare numbers unless they have cents and are not date-like
 // We DO NOT remove legacy logic; we keep it as a fallback.
+
 export function findFirstMoney(s) {
   // ✅ NEW strict path (prevents dates like 03/28/2013 turning into $3.00)
   const strict = findFirstMoney_STRICT(s);
@@ -17,7 +18,7 @@ export function findFirstMoney(s) {
   if (!m) return null;
   const amt = normalizeAmount(m[1]);
   const val = Number(amt);
-  if (!isFinite(val) || val <= 0) return null;
+  if (!isFiniteNumber(val) || val <= 0) return null;
   return amt;
 }
 
@@ -34,7 +35,7 @@ export function extractAllMoney(s) {
   while ((m = rx.exec(str))) {
     const amt = normalizeAmount(m[1]);
     const val = Number(amt);
-    if (!isFinite(val) || val <= 0) continue;
+    if (!isFiniteNumber(val) || val <= 0) continue;
     if (val >= 1900 && val <= 2099) continue;
     out.push({ amount: amt, value: val });
     if (out.length > 250) break;
@@ -42,7 +43,7 @@ export function extractAllMoney(s) {
   return out;
 }
 
-// ✅ NEW strict-first helpers (ADDED)
+// ✅ NEW strict-first helpers (ADDED + IMPROVED)
 function findFirstMoney_STRICT(input) {
   const s = String(input || "");
   if (!s) return null;
@@ -54,31 +55,27 @@ function findFirstMoney_STRICT(input) {
     const amt = normalizeAmount(m[1]);
     if (!amt) continue;
     const val = Number(amt);
-    if (!isFinite(val) || val <= 0) continue;
+    if (!isFiniteNumber(val) || val <= 0) continue;
     if (val >= 1900 && val <= 2099) continue;
-    // $ amounts are almost never dates; still protect obvious date adjacency
     if (isDateLikeContext(s, m.index)) continue;
     return amt;
   }
 
-  // 2) Then allow non-$ amounts ONLY if they look like real money (has cents or >= 10) and not in date-like context
+  // 2) Then allow non-$ amounts ONLY if they look like real money
   const loose = /([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})|[0-9]+(?:\.[0-9]{2}))/g;
   while ((m = loose.exec(s))) {
     const raw = m[1];
     const amt = normalizeAmount(raw);
     const val = Number(amt);
-    if (!isFinite(val) || val <= 0) continue;
+    if (!isFiniteNumber(val) || val <= 0) continue;
     if (val >= 1900 && val <= 2099) continue;
 
-    // Ignore 1–2 digit bare values (03, 04, 7) unless they have cents and are not date-like
     const hasCents = /\.[0-9]{2}$/.test(raw);
     if (!hasCents && val < 10) continue;
-
     if (isDateLikeContext(s, m.index)) continue;
 
     return amt;
   }
-
   return null;
 }
 
@@ -94,7 +91,7 @@ function extractAllMoney_STRICT(input) {
   while ((m = dollar.exec(s))) {
     const amt = normalizeAmount(m[1]);
     const val = Number(amt);
-    if (!isFinite(val) || val <= 0) continue;
+    if (!isFiniteNumber(val) || val <= 0) continue;
     if (val >= 1900 && val <= 2099) continue;
     if (isDateLikeContext(s, m.index)) continue;
     out.push({ amount: amt, value: val });
@@ -104,45 +101,40 @@ function extractAllMoney_STRICT(input) {
   // If we found $ amounts, that’s the cleanest set — return early.
   if (out.length) return out;
 
-  // 2) Otherwise collect "money-like" numbers (cents preferred; ignore dates)
+  // 2) Otherwise collect "money-like" numbers
   const loose = /([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})|[0-9]+(?:\.[0-9]{2}))/g;
   while ((m = loose.exec(s))) {
     const raw = m[1];
     const amt = normalizeAmount(raw);
     const val = Number(amt);
-    if (!isFinite(val) || val <= 0) continue;
+    if (!isFiniteNumber(val) || val <= 0) continue;
     if (val >= 1900 && val <= 2099) continue;
 
     const hasCents = /\.[0-9]{2}$/.test(raw);
     if (!hasCents && val < 10) continue;
-
     if (isDateLikeContext(s, m.index)) continue;
 
     out.push({ amount: amt, value: val });
     if (out.length > 250) break;
   }
-
   return out;
 }
 
-// ✅ NEW: detect if the match position is inside something like 03/28/2013 or 04-18-2013
+// ✅ Improved date context detection
 function isDateLikeContext(str, idx) {
   const s = String(str || "");
   const i = Number(idx || 0);
 
-  // Look around the match for slashes/dashes typical of dates
-  const left = s.slice(Math.max(0, i - 6), i + 1);
-  const right = s.slice(i, Math.min(s.length, i + 12));
+  const left = s.slice(Math.max(0, i - 12), i + 1);
+  const right = s.slice(i, Math.min(s.length, i + 18));
   const window = (left + right).replace(/\s+/g, "");
 
-  // Common date patterns near the match:
-  // 03/28/2013, 3/28/13, 04-18-2013, 2013-03-28
   if (/\d{1,4}[\/\-]\d{1,2}[\/\-]\d{1,4}/.test(window)) return true;
+  if (/\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}/.test(window)) return true;
 
-  // Also if immediate neighbor chars indicate date separators
   const before = s[i - 1] || "";
   const after = s[i + 1] || "";
-  if (before === "/" || after === "/" || before === "-" || after === "-") return true;
+  if ("/-".includes(before) || "/-".includes(after)) return true;
 
   return false;
 }
@@ -163,13 +155,16 @@ function buildField(label, amountStr, sourceType, reasonBase) {
   const cleaned = normalizeAmount(amountStr);
   let confidence = 0.70;
   let reason = reasonBase;
+
   if (sourceType.includes("pdf")) confidence += 0.10;
   if (sourceType.includes("excel")) confidence += 0.05;
   if (sourceType.includes("ocr")) {
     confidence -= 0.18;
     reason += " (OCR text can be noisy)";
   }
+
   confidence = clamp(confidence, 0.15, 0.95);
+
   return {
     label,
     value: formatUSD(cleaned),
@@ -198,6 +193,9 @@ function candidateMoneyByLine(lines, keywords) {
 export function extractMoneyField(text, cfg) {
   const { label, sourceType, strongRegexes = [], lineKeywords = [], fallbackPick } = cfg;
 
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+
+  // 1. Strong regexes
   for (const rx of strongRegexes) {
     const m = text.match(rx);
     if (m) {
@@ -206,27 +204,26 @@ export function extractMoneyField(text, cfg) {
     }
   }
 
-  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
-  const kw = lineKeywords.map((k) => k.toLowerCase());
-
-  const candidateLines = lines.filter((l) => {
-    const ll = l.toLowerCase();
-    return kw.some((k) => ll.includes(k));
-  });
-
-  for (const line of candidateLines) {
-    const amt = findFirstMoney(line);
-    if (amt) return buildField(label, amt, sourceType, "Found amount on labeled line");
+  // 2. Direct keyword lines
+  for (const line of lines) {
+    const ll = line.toLowerCase();
+    if (lineKeywords.some((k) => ll.includes(k.toLowerCase()))) {
+      const amt = findFirstMoney(line);
+      if (amt) return buildField(label, amt, sourceType, "Found amount on labeled line");
+    }
   }
 
+  // 3. Nearby window search
   for (let i = 0; i < lines.length; i++) {
     const ll = lines[i].toLowerCase();
-    if (!kw.some((k) => ll.includes(k))) continue;
+    if (!lineKeywords.some((k) => ll.includes(k.toLowerCase()))) continue;
+
     const window = [lines[i], lines[i + 1] || "", lines[i + 2] || ""].join(" ");
     const amt = findFirstMoney(window);
     if (amt) return buildField(label, amt, sourceType, "Found amount near labeled text");
   }
 
+  // 4. Fallbacks
   const allMoney = extractAllMoney(text);
   if (!allMoney.length) return notDetectedField(label, sourceType, "No currency values detected");
 
@@ -239,8 +236,8 @@ export function extractMoneyField(text, cfg) {
     if (dueCandidates.length) {
       return buildField(label, dueCandidates[0].amount, sourceType, "Fallback: selected due/balance amount");
     }
-    const sorted = [...allMoney].sort((a, b) => a.value - b.value);
-    return buildField(label, sorted[sorted.length - 1].amount, sourceType, "Fallback: largest amount (heuristic)");
+    const sorted = [...allMoney].sort((a, b) => b.value - a.value);
+    return buildField(label, sorted[0].amount, sourceType, "Fallback: largest amount (heuristic)");
   }
 
   if (fallbackPick === "max") {
@@ -257,4 +254,3 @@ export function extractMoneyField(text, cfg) {
 
   return buildField(label, allMoney[0].amount, sourceType, "Fallback: first detected amount");
 }
-

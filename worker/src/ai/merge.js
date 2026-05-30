@@ -16,7 +16,7 @@ export function mergeAIResults(openAI, gemini) {
   const pick = a || g;
   if (!pick) return null;
 
-  const fields = {
+  let fields = {
     totalCharges: pick?.fields?.totalCharges || null,
     insurancePaid: pick?.fields?.insurancePaid || null,
     patientResponsibility: pick?.fields?.patientResponsibility || null,
